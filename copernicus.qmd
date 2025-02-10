@@ -1,0 +1,293 @@
+---
+title: "Copernicus for Sanctuaries"
+format:
+  html:
+    embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+## Sanctuaries
+
+```{r}
+librarian::shelf(
+  dplyr, glue, here, leaflet, mapview, ncdf4, readr, reticulate, sf, stringr, terra, tidyr,
+  quiet = T)
+options(readr.show_col_types = F)
+
+sanctuaries_geo <- here("data/sanctuaries.geojson")
+# copernicusmarine username and password
+user        <- "bbest1"
+pass_txt    <- "~/My Drive/private/data.marine.copernicus.eu_bbest1-password.txt"
+dir_cm      <- here("data/copernicus")
+results_csv <- glue("{dir_cm}/copernicus_sanctuaries.csv")
+```
+
+```{r}
+if (!file.exists(sanctuaries_geo)){
+  # source: https://github.com/noaa-onms/climate-dashboard/blob/main/data/sanctuaries.rds
+  sanctuaries_rds <- here("../climate-dashboard/data/sanctuaries.rds")
+  readRDS(sanctuaries_rds) |> 
+    write_sf(sanctuaries_geo)
+}
+
+sanctuaries <- read_sf(sanctuaries_geo)
+mapView(sanctuaries)
+```
+
+## Copernicus
+
+### R `reticulate` to Py `copernicusmarine`
+
+-   [How to sign up for Copernicus Marine Service? | Copernicus Marine Help Center](https://help.marine.copernicus.eu/en/articles/4220332-how-to-sign-up-for-copernicus-marine-service)
+-   [How to download data via the Copernicus Marine Toolbox in R? \| Copernicus Marine Help Center](https://help.marine.copernicus.eu/en/articles/8638253-how-to-download-data-via-the-copernicus-marine-toolbox-in-r#h_c480a903fd)
+
+### Products > Datasets > Variables
+
+
+#### Product name: Global Ocean Physics Reanalysis
+
+Product identifier: `GLOBAL_MULTIYEAR_PHY_001_030`
+
+Variables, keep:
+
+- `thetao`: Sea water potential temperature [°C]
+- `bottomT`: Sea water potential temperature at sea floor [°C]
+- `so`: Sea water salinity [/ 103]
+- `sob`: Sea water salinity at sea floor [/ 103]
+- `mlotst`: Ocean mixed layer thickness defined by sigma theta [m]
+
+Variables, skip:
+- `siconc`: Sea ice area fraction
+- `sithick`: Sea ice thickness [m]
+- `usi`: Eastward sea ice velocity [m/s]
+- `vsi`: Northward sea ice velocity [m/s]
+- `uo`: Eastward sea water velocity [m/s]
+- `vo`:  Northward sea water velocity [m/s]
+- `zos`: Sea surface height above geoid [m]
+
+
+- Dataset: `cmems_mod_glo_phy_my_0.083deg_P1M-m` (**monthly**)
+  * Dates: `01/01/1993, 00:00`→`06/01/2021, 00:00`
+  * Depths: `0.5 m`→`5727.9 m`
+
+- Dataset: `cmems_mod_glo_phy_myint_0.083deg_P1M-m` (**Interim, monthly**)\
+  same as above except:
+  * Dates: `07/01/2021, 00:00`→`11/01/2024, 00:00`
+
+
+### Fetch bottom temperature (`tob`)
+
+- [Global Ocean Physics Analysis and Forecast | Copernicus Marine Service](https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_PHY_001_024/download?dataset=cmems_mod_glo_phy_anfc_0.083deg_P1M-m_202406)
+
+- [ ] [Global Ocean Physics Reanalysis | Copernicus Marine Service](https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_001_030/description)
+  - `cmems_mod_glo_phy_my_0.083deg_P1M-m` contains the monthly mean fields: 3D potential temperature, salinity and currents information from top to bottom and 2D sea surface level, bottom potential temperature, mixed layer thickness, sea ice thickness, sea ice fraction and sea ice velocities information.
+
+- Product identifier: `GLOBAL_ANALYSISFORECAST_PHY_001_024`
+- Product name: "Global Ocean Physics Analysis and Forecast"
+  - [manual](https://catalogue.marine.copernicus.eu/documents/PUM/CMEMS-GLO-PUM-001-024.pdf)
+    - **cmems_mod_glo_phy_anfc_0.083deg_P1M-m** which contains the 2D monthly mean fields: sea surface level, bottom pressure, bottom salinity, bottom potential temperature, mixed layer thickness, sea ice albedo, sea ice age, sea ice surface temperature, sea ice
+speed, snow thickness, sea ice thickness, sea ice fraction and sea ice velocities information.
+    - Sea water **_potential_ temperature** at sea floor **`tob`** [°C]
+
+Variables used:
+- `thetao`: Sea water potential temperature [°C]
+- `mlotst`: Ocean mixed layer thickness defined by sigma theta [m]
+- `tob`: Sea water potential temperature at sea floor [°C]
+- `so`: Sea water salinity [/ 103]
+- `sob`: Sea water salinity at sea floor [/ 103]
+
+
+Variables skipped (sea ice, ...):
+
+- `ist`: Sea ice surface temperature [°C]
+- `pbo`: Sea water pressure at sea floor [dbar]
+- `siage`: Age of sea ice [years]
+- `sialb`: Sea ice albedo [%]
+- `siconc`: Sea ice area fraction
+- `sisnthick`: Surface snow thickness [m]
+- `sithick`: Sea ice thickness [m]
+- `sivelo`: Sea ice speed [m/s]
+- `usi`: Eastward sea ice velocity [m/s]
+- `vsi`: Northward sea ice velocity [m/s]
+- `zos`: Sea surface height above geoid [m]
+
+Sea water potential temperature at sea floorbottomT [°C]
+
+Ocean mixed layer thickness defined by sigma thetamlotst [m]
+
+
+
+
+Please choose one of the datasets in this product:
+
+#### Statics (bathymetry)   ·   cmems_mod_glo_phy_my_0.083deg_static (bathy)
+
+Variables:
+
+- `deptho`: Sea floor depth below geoid [m]
+- `deptho_lev`: Model level number at sea floor
+- `mask`: Sea binary mask
+
+```{r}
+
+# do once: create virtual enviroment and install copernicusmarine Python module
+# virtualenv_create(envname = "CopernicusMarine")
+# virtualenv_install(envname = "CopernicusMarine", packages = c("copernicusmarine"))
+
+# TODO: check for CopernicusMarine env with copernicusmarine Python module
+
+# use virtualenv and reticulate::import copernicusmarine Python module
+use_virtualenv(virtualenv = "CopernicusMarine", required = TRUE)
+cmt <- import("copernicusmarine")
+
+# login
+pass <- readLines(pass_txt)
+cmt$login(user, pass, skip_if_user_logged_in = T) # py_help(cmt$login)
+# writes to /Users/bbest/.copernicusmarine/.copernicusmarine-credentials
+```
+
+```{r}
+# py_help(cmt$describe)
+# cat_anfc = cmt$describe(
+#   contains             = list("GLOBAL_ANALYSISFORECAST_PHY_001_024"), 
+#   include_datasets     = T,
+#   disable_progress_bar = T)
+# cat_rean = cmt$describe(
+#   contains             = list("GLOBAL_MULTIYEAR_PHY_001_030", "bottomT"), 
+#   include_datasets     = T,
+#   disable_progress_bar = T)
+# View(cat_rean)
+
+datasets <- list(
+  "cmems_mod_glo_phy_my_0.083deg_P1M-m" = list(    # reanalysis monthly
+    vars      = list("thetao", "bottomT", "so", "mlotst"),
+    date_rng  = c("1993-01-01T00:00:00","2021-06-01T00:00:00"),
+    depth_rng =  c(0, 0.5)),
+  "cmems_mod_glo_phy_myint_0.083deg_P1M-m" = list(  # reanalysis monthly, interim
+    vars      = list("thetao", "bottomT", "so", "mlotst"),
+    date_rng  = c("2021-07-01T00:00:00","2024-12-01T00:00:00"),
+    depth_rng =  c(0, 0.5)))
+```
+
+- [cmems_mod_glo_phy_myint_0.083deg_P1M-m_202311 - Form - Global Ocean Physics Reanalysis | Copernicus Marine Service](https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_001_030/download?dataset=cmems_mod_glo_phy_myint_0.083deg_P1M-m_202311)
+
+```{r}
+for (i in 1:nrow(sanctuaries)){ # i = 1
+
+  d_s <- slice(sanctuaries, i)
+  bb <- d_s |> 
+    st_buffer(9.25*1000) |> # buffer by a pixel width 1/12° ~ 9.25 km at equator
+    st_bbox()
+
+  dir_out <- here(glue("{dir_cm}/{d_s$nms}"))
+  
+  message(glue("{i}/{nrow(sanctuaries)}: {d_s$sanctuary} ({d_s$nms})"))
+  dir.create(dir_out, showWarnings=F, recursive=T)
+  
+  for (j in 1:length(datasets)){ # j=1
+    
+    ds_id <- names(datasets)[j]
+    ds    <- datasets[[j]]
+    message(glue("{j}/{length(datasets)}: {ds_id}"))
+    
+    # py_help( cmt$subset)
+    nc <- cmt$subset(
+      dataset_id            = ds_id,
+      # dataset_version     = "202309",
+      variables             = ds$vars,
+      minimum_longitude     = bb$xmin,
+      maximum_longitude     = bb$xmax,
+      minimum_latitude      = bb$ymin,
+      maximum_latitude      = bb$ymax,
+      start_datetime        = ds$date_rng[1],
+      end_datetime          = ds$date_rng[2],
+      minimum_depth         = ds$depth_rng[1],
+      maximum_depth         = ds$depth_rng[2],
+      output_directory      = dir_out,
+      force_download        = T,
+      overwrite_output_data = T)
+    nc <- as.character(nc)
+    
+    # show output_filename with parameters embedded
+    # cat(glue("output_filename (basename): {basename(nc)}"))
+  }
+}
+```
+
+```{r}
+#| label: plot_rast
+
+nms = "HIHWNMS"
+ply <- sanctuaries |> 
+  filter(nms == !!nms)
+nc <- list.files(glue("data/copernicus/{nms}"), full.names = T)[1]
+
+o <- nc_open(nc)
+o
+
+r <- rast(nc)
+r
+names(r)
+time(r)
+
+i <- 1
+cat(glue("index: {i}; layer: {names(r)[i]};  time_index: {time(r[[i]])}; varname: {varnames(r[[i]])}; longname: {longnames(r[[i]])}"))
+
+# plot interactive map
+plet(
+  r[[i]], 
+  main  = glue("{longnames(r[[i]])}\n{time(r[[i]])}"), 
+  tiles = "Esri.OceanBasemap") |> 
+  addPolygons(
+    data        = sanctuaries[1,],
+    fillOpacity = 0)
+```
+
+
+```{r}
+#| label: extract
+
+extract_tbl <- function(r, p, stat = "mean"){
+  terra::extract(r, p, fun = stat) |> 
+    pivot_longer(!ID, names_to = "var_it") |> 
+    mutate(
+      var  = str_replace(var_it, "_[0-9]$", ""),
+      stat = !!stat,
+      time = time(r)) |> 
+    select(var, time, stat, value)
+}
+
+ncs <- list.files("data/copernicus", "\\.nc$", recursive = T, full.names = T)
+
+for (i in 1:length(ncs)){ # i=17
+  nc    <- ncs[i]
+  nms   <- str_replace(nc, ".*/copernicus/([A-Z-]+)/(.+)_multi-vars.*", "\\1")
+  ds_id <- str_replace(nc, ".*/copernicus/([A-Z-]+)/(.+)_multi-vars.*", "\\2")
+  message(glue("{i}/{length(ncs)}: nms:{nms}, ds:{ds_id}"))
+  
+  r <- rast(nc)
+  p <- sanctuaries |> 
+    filter(nms == !!nms)
+  
+  d <- bind_rows(
+    extract_tbl(r, p, "mean"),
+    extract_tbl(r, p, "sd")) |> 
+    mutate(
+      nms     = !!nms,
+      dataset = !!ds_id) |> 
+    relocate(nms, dataset)
+  
+  if (file.exists(results_csv)){
+    read_csv(results_csv) |> 
+      bind_rows(d) |> 
+      distinct(nms, dataset, var, time, stat) |> 
+      arrange(nms, dataset, var, time, stat) |> 
+      write_csv(results_csv)
+  } else {
+    write_csv(d, results_csv)
+  }
+}
+
+```
+
