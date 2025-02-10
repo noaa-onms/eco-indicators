@@ -11,7 +11,7 @@ editor_options:
 
 ```{r}
 librarian::shelf(
-  dplyr, glue, here, leaflet, mapview, ncdf4, readr, reticulate, sf, stringr, terra, tidyr,
+  dplyr, ggplot2, glue, here, leaflet, mapview, ncdf4, readr, reticulate, sf, stringr, terra, tidyr,
   quiet = T)
 options(readr.show_col_types = F)
 
@@ -234,14 +234,18 @@ time(r)
 i <- 1
 cat(glue("index: {i}; layer: {names(r)[i]};  time_index: {time(r[[i]])}; varname: {varnames(r[[i]])}; longname: {longnames(r[[i]])}"))
 
+p <- sanctuaries |> 
+  filter(nms == "CBNMS")
+
 # plot interactive map
 plet(
-  r[[i]], 
-  main  = glue("{longnames(r[[i]])}\n{time(r[[i]])}"), 
+  r[[1]], 
+  # main  = glue("{longnames(r[[i]])}\n{time(r[[i]])}"), 
+  main  = glue("{names(r)[1]}\n{time(r[[i]])}"), 
   tiles = "Esri.OceanBasemap") |> 
   addPolygons(
-    data        = sanctuaries[1,],
-    fillOpacity = 0)
+    data        = p,
+    fillOpacity = 0.2)
 ```
 
 
@@ -249,10 +253,10 @@ plet(
 #| label: extract
 
 extract_tbl <- function(r, p, stat = "mean"){
-  terra::extract(r, p, fun = stat) |> 
+  terra::extract(r, p, fun = stat, na.rm=T) |>
     pivot_longer(!ID, names_to = "var_it") |> 
     mutate(
-      var  = str_replace(var_it, "_[0-9]$", ""),
+      var  = str_replace(var_it, "_[0-9]+$", ""),
       stat = !!stat,
       time = time(r)) |> 
     select(var, time, stat, value)
@@ -260,13 +264,14 @@ extract_tbl <- function(r, p, stat = "mean"){
 
 ncs <- list.files("data/copernicus", "\\.nc$", recursive = T, full.names = T)
 
-for (i in 1:length(ncs)){ # i=17
+for (i in 1:length(ncs)){ # i=9
   nc    <- ncs[i]
-  nms   <- str_replace(nc, ".*/copernicus/([A-Z-]+)/(.+)_multi-vars.*", "\\1")
-  ds_id <- str_replace(nc, ".*/copernicus/([A-Z-]+)/(.+)_multi-vars.*", "\\2")
+  nms   <- str_replace(nc, ".*/copernicus/([A-z-]+)/(.+)_multi-vars.*", "\\1")
+  ds_id <- str_replace(nc, ".*/copernicus/([A-z-]+)/(.+)_multi-vars.*", "\\2")
   message(glue("{i}/{length(ncs)}: nms:{nms}, ds:{ds_id}"))
   
   r <- rast(nc)
+  # plet(r[[1]])
   p <- sanctuaries |> 
     filter(nms == !!nms)
   
@@ -281,13 +286,61 @@ for (i in 1:length(ncs)){ # i=17
   if (file.exists(results_csv)){
     read_csv(results_csv) |> 
       bind_rows(d) |> 
-      distinct(nms, dataset, var, time, stat) |> 
+      group_by(nms, dataset, var, time, stat) |> 
+      summarize(
+        value   = last(value), 
+        .groups = "drop") |> 
       arrange(nms, dataset, var, time, stat) |> 
       write_csv(results_csv)
   } else {
     write_csv(d, results_csv)
   }
 }
+```
 
+```{r}
+d <- read_csv(results_csv)
+# table(d$var)
+# bottomT  mlotst  so_depth=0.49402499  thetao_depth=0.49402499 
+#   12288   12288                12288                    12288
+
+plot_var_facets <- function(nms, data){
+  png <- glue("figures/copernicus/{nms}.png")
+  data |> 
+    filter(
+      nms == !!nms) |> 
+    mutate(
+      var = str_replace(var, "_depth=0.49402499", "_0.5m")) |> 
+    pivot_wider(
+      names_from = stat,
+      values_from = value) |> 
+    ggplot(aes(x = time, y = mean, color = var)) + 
+    facet_wrap(~ var) +
+    geom_line() + 
+    geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = var), color = NA, alpha = 0.2) + 
+    theme(legend.position = "none") + 
+    facet_wrap(~var, scales = "free_y") + 
+    labs(
+      title = nms,
+      x = "Time", 
+      y = "Value")
+  ggsave(png, width = 8, height = 6)
+}
+
+sapply(sanctuaries$nms, plot_var_facets, data = d)
+```
+
+```{r}
+nc <- ncs[9]
+r <- rast(nc)
+p <- sanctuaries |> 
+  filter(nms == "FKNMS")
+plet(
+  r[[1]], 
+  main  = glue("{longnames(r[[i]])}\n{time(r[[i]])}"), 
+  tiles = "Esri.OceanBasemap") |> 
+  addPolygons(
+    data        = p,
+    fillOpacity = 0)
 ```
 
