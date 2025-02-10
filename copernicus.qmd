@@ -28,10 +28,14 @@ if (!file.exists(sanctuaries_geo)){
   # source: https://github.com/noaa-onms/climate-dashboard/blob/main/data/sanctuaries.rds
   sanctuaries_rds <- here("../climate-dashboard/data/sanctuaries.rds")
   readRDS(sanctuaries_rds) |> 
-    write_sf(sanctuaries_geo)
+    filter(nms != "TBNMS") |> # exclude Great Lakes
+    write_sf(sanctuaries_geo, delete_dsn = T)
 }
 
 sanctuaries <- read_sf(sanctuaries_geo)
+sanctuaries |> 
+  st_drop_geometry() |> 
+  View()
 mapView(sanctuaries)
 ```
 
@@ -285,12 +289,12 @@ for (i in 1:length(ncs)){ # i=9
   
   if (file.exists(results_csv)){
     read_csv(results_csv) |> 
-      bind_rows(d) |> 
-      group_by(nms, dataset, var, time, stat) |> 
+      bind_rows(d) |>
+      group_by(nms, dataset, var, time, stat) |>
       summarize(
-        value   = last(value), 
-        .groups = "drop") |> 
-      arrange(nms, dataset, var, time, stat) |> 
+        value   = last(value),
+        .groups = "drop") |>
+      arrange(nms, dataset, var, time, stat) |>
       write_csv(results_csv)
   } else {
     write_csv(d, results_csv)
