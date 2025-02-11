@@ -2,6 +2,7 @@
 title: "Copernicus for Sanctuaries"
 format:
   html:
+    toc: true
     embed-resources: true
     code-fold: true
     code-tools: true    
@@ -22,7 +23,7 @@ sanctuaries_geo <- here("data/sanctuaries.geojson")
 user        <- "bbest1"
 pass_txt    <- "~/My Drive/private/data.marine.copernicus.eu_bbest1-password.txt"
 dir_cm      <- here("data/copernicus")
-results_csv <- glue("{dir_cm}/copernicus_sanctuaries.csv")
+results_csv <- here("data/copernicus.csv")
 ```
 
 ## Sanctuaries
@@ -98,6 +99,7 @@ Variables, keep:
 - `mlotst`: Ocean mixed layer thickness defined by sigma theta [m]
 
 Variables, skip:
+
 - `siconc`: Sea ice area fraction
 - `sithick`: Sea ice thickness [m]
 - `usi`: Eastward sea ice velocity [m/s]
@@ -281,6 +283,20 @@ for (i in 1:length(ncs)){ # i=9
   }
 }
 ```
+
+
+```{r}
+#| label: show_ts
+
+results_url <- results_csv |> 
+  str_replace(
+    here(), "https://github.com/noaa-onms/eco-indicators/blob/main")
+
+# show table
+read_csv(results_csv)
+```
+
+table of results: [`r basename(results_url)`](`r results_url`)
 
 ## Generate timeseries plot per sanctuary 
 
