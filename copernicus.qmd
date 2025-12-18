@@ -12,17 +12,34 @@ editor_options:
 
 ```{r}
 #| label: setup
+#| warning: false
+
 librarian::shelf(
-  dplyr, DT, ggplot2, glue, here, jsonlite, leaflet, mapview, ncdf4, readr, reticulate, 
-  sf, stringr, terra, tidyr,
-  quiet = T)
+  dplyr,
+  DT,
+  fs,
+  ggplot2,
+  glue,
+  here,
+  jsonlite,
+  leaflet,
+  mapview,
+  ncdf4,
+  readr,
+  reticulate,
+  sf,
+  stringr,
+  terra,
+  tidyr,
+  quiet = T
+)
 options(readr.show_col_types = F)
 
 sanctuaries_geo <- here("data/sanctuaries.geojson")
 # copernicusmarine username and password
-user        <- "bbest1"
-pass_txt    <- "~/My Drive/private/data.marine.copernicus.eu_bbest1-password.txt"
-dir_cm      <- here("data/copernicus")
+user <- "bbest1"
+pass_txt <- "~/My Drive/private/data.marine.copernicus.eu_bbest1-password.txt"
+dir_cm <- here("data/copernicus")
 results_csv <- here("data/copernicus.csv")
 ```
 
@@ -33,17 +50,17 @@ We are extracting Copernicus Marine data from across National Marine Sanctuaries
 ```{r}
 #| label: sanctuaries
 
-if (!file.exists(sanctuaries_geo)){
+if (!file.exists(sanctuaries_geo)) {
   # source: https://github.com/noaa-onms/climate-dashboard/blob/main/data/sanctuaries.rds
   sanctuaries_rds <- here("../climate-dashboard/data/sanctuaries.rds")
-  readRDS(sanctuaries_rds) |> 
+  readRDS(sanctuaries_rds) |>
     filter(nms != "TBNMS") |> # exclude Great Lakes
     write_sf(sanctuaries_geo, delete_dsn = T)
 }
 
 sanctuaries <- read_sf(sanctuaries_geo)
-sanctuaries |> 
-  st_drop_geometry() |> 
+sanctuaries |>
+  st_drop_geometry() |>
   datatable()
 mapView(sanctuaries)
 ```
@@ -69,8 +86,9 @@ cmt <- import("copernicusmarine")
 
 # login
 pass <- readLines(pass_txt)
-cmt$login(user, pass, skip_if_user_logged_in = T) # py_help(cmt$login)
-# writes to /Users/bbest/.copernicusmarine/.copernicusmarine-credentials
+stopifnot(
+  cmt$login(user, pass, force_overwrite = T)) # py_help(cmt$login)
+# writes to ~/.copernicusmarine/.copernicusmarine-credentials
 ```
 
 ## Extract Global Ocean Physics Reanalysis
@@ -86,10 +104,10 @@ Product > Dataset > Variable
   * Dates: `01/01/1993, 00:00`→`06/01/2021, 00:00`
   * Depths: `0.5 m`→`5727.9 m`
 
-- Dataset: `cmems_mod_glo_phy_myint_0.083deg_P1M-m` (**Interim, monthly**)\
-  [Subset Form | Copernicus Marine Service](https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_001_030/download?dataset=cmems_mod_glo_phy_myint_0.083deg_P1M-m_202311)
-  same as above except:
-  * Dates: `07/01/2021, 00:00`→`11/01/2024, 00:00`
+<!-- - Dataset: `cmems_mod_glo_phy_myint_0.083deg_P1M-m` (**Interim, monthly**)\ -->
+<!--   [Subset Form | Copernicus Marine Service](https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_001_030/download?dataset=cmems_mod_glo_phy_myint_0.083deg_P1M-m_202311) -->
+<!--   same as above except: -->
+<!--   * Dates: `07/01/2021, 00:00`→`11/01/2024, 00:00` -->
 
 Variables, keep:
 
@@ -108,6 +126,12 @@ Variables, skip:
 - `vo`:  Northward sea water velocity [m/s]
 - `zos`: Sea surface height above geoid [m]
 
+## Extract Global Ocean Colour
+
+- [Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing) | Copernicus Marine Service](https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/services)
+  - [Plankton, multi-sensor (4 km), monthly](https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/download?dataset=cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M_202411)
+  - [Primary production, multi-sensor (4 km), monthly](https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/download?dataset=cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M_202311)
+
 ### Setup dataset parameters
 
 ```{r}
@@ -115,26 +139,50 @@ Variables, skip:
 
 # py_help(cmt$describe)
 # cat_anfc = cmt$describe(
-#   contains             = list("GLOBAL_ANALYSISFORECAST_PHY_001_024"), 
+#   contains             = list("GLOBAL_ANALYSISFORECAST_PHY_001_024"),
 #   include_datasets     = T,
 #   disable_progress_bar = T)
 # cat_rean = cmt$describe(
-#   contains             = list("GLOBAL_MULTIYEAR_PHY_001_030", "bottomT"), 
+#   contains             = list("GLOBAL_MULTIYEAR_PHY_001_030", "bottomT"),
 #   include_datasets     = T,
 #   disable_progress_bar = T)
 # View(cat_rean)
+# listviewer::jsonedit(d$json())
 
 datasets <- list(
-  "cmems_mod_glo_phy_my_0.083deg_P1M-m" = list(    # reanalysis monthly
-    vars      = list("thetao", "bottomT", "so", "mlotst"),
-    date_rng  = c("1993-01-01T00:00:00","2021-06-01T00:00:00"),
-    depth_rng =  c(0, 0.5)), # get surface layer only
-  "cmems_mod_glo_phy_myint_0.083deg_P1M-m" = list(  # reanalysis monthly, interim
-    vars      = list("thetao", "bottomT", "so", "mlotst"),
-    date_rng  = c("2021-07-01T00:00:00","2024-12-01T00:00:00"),
-    depth_rng =  c(0, 0.5))) # get surface layer only
-datasets |> 
-  toJSON(auto_unbox = T, pretty=T)
+  # https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_PHY_001_030/download?dataset=cmems_mod_glo_phy_my_0.083deg_P1M-m
+  "cmems_mod_glo_phy_my_0.083deg_P1M-m" = list(
+    # Global Ocean Physics Reanalysis - monthly
+    vars = list("thetao", "bottomT", "so", "mlotst"),
+    # date_rng = c("1993-01-01T00:00:00", "2021-06-01T00:00:00"),
+    date_rng = c("1993-01-01T00:00:00", "2025-10-01T00:00:00"),
+    depth_rng = c(0, 0.5)
+  ), # get surface layer only
+  # "cmems_mod_glo_phy_myint_0.083deg_P1M-m" = list(
+  #   # reanalysis monthly, interim
+  #   vars = list("thetao", "bottomT", "so", "mlotst"),
+  #   date_rng = c("2021-07-01T00:00:00", "2024-12-01T00:00:00"),
+  #   depth_rng = c(0, 0.5)
+  # ),
+  # Plankton, multi-sensor (4 km), monthly
+  "cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M" = list(
+    vars = list(
+      "CHL", "CHL_uncertainty", "DIATO", "DIATO_uncertainty", "DINO", 
+      "DINO_uncertainty", "GREEN", "GREEN_uncertainty", "HAPTO", 
+      "HAPTO_uncertainty", "MICRO", "MICRO_uncertainty", "NANO", 
+      "NANO_uncertainty", "PICO", "PICO_uncertainty", "PROCHLO", 
+      "PROCHLO_uncertainty", "PROKAR", "PROKAR_uncertainty", "flags"),
+    date_rng = c("1997-09-01T00:00:00", "2025-11-01T00:00:00"),
+    depth_rng = c(0, 0.5) ),
+  
+  # Primary production, multi-sensor (4 km), monthly
+  "cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M" = list(
+    vars = list("PP", "PP_uncertainty", "flags"),
+    date_rng = c("1997-09-01T00:00:00", "2025-11-01T00:00:00"),
+    depth_rng = c(0, 0.5) ) )
+  
+datasets |>
+  toJSON(auto_unbox = T, pretty = T)
 ```
 
 ### Iterate over sanctuaries & datasets to subset
@@ -143,45 +191,60 @@ datasets |>
 #| label: subset
 #| eval: false
 
-for (i in 1:nrow(sanctuaries)){ # i = 1
+for (i in 1:nrow(sanctuaries)) {
+  # i = 1
 
   d_s <- slice(sanctuaries, i)
-  bb <- d_s |> 
-    st_buffer(9.25*1000) |> # buffer by a pixel width 1/12° ~ 9.25 km at equator
+  bb <- d_s |>
+    st_buffer(9.25 * 1000) |> # buffer by a pixel width 1/12° ~ 9.25 km at equator
     st_bbox()
 
   dir_out <- here(glue("{dir_cm}/{d_s$nms}"))
-  dir.create(dir_out, showWarnings=F, recursive=T)
-  message(glue("{i}/{nrow(sanctuaries)}: {d_s$sanctuary} ({d_s$nms})"))
-  
-  for (j in 1:length(datasets)){ # j=1
-    
+  dir.create(dir_out, showWarnings = F, recursive = T)
+  message(glue("{i}/{nrow(sanctuaries)}: {d_s$sanctuary} ({d_s$nms}) ~ {format(Sys.time(), '%H:%M:%S')}"))
+
+  for (j in 1:length(datasets)) {
+    # j=2
+
     ds_id <- names(datasets)[j]
-    ds    <- datasets[[j]]
+    ds <- datasets[[j]]
     message(glue("{j}/{length(datasets)}: {ds_id}"))
-    
-    # py_help( cmt$subset)
+
+    # py_help(cmt$subset)
     nc <- cmt$subset(
-      dataset_id            = ds_id,
+      dataset_id = ds_id,
       # dataset_version     = "202309",
-      variables             = ds$vars,
-      minimum_longitude     = bb$xmin,
-      maximum_longitude     = bb$xmax,
-      minimum_latitude      = bb$ymin,
-      maximum_latitude      = bb$ymax,
-      start_datetime        = ds$date_rng[1],
-      end_datetime          = ds$date_rng[2],
-      minimum_depth         = ds$depth_rng[1],
-      maximum_depth         = ds$depth_rng[2],
-      output_directory      = dir_out,
-      force_download        = T,
-      overwrite_output_data = T)
+      variables = ds$vars,
+      minimum_longitude = bb$xmin,
+      maximum_longitude = bb$xmax,
+      minimum_latitude = bb$ymin,
+      maximum_latitude = bb$ymax,
+      start_datetime = ds$date_rng[1],
+      end_datetime = ds$date_rng[2],
+      minimum_depth = ds$depth_rng[1],
+      maximum_depth = ds$depth_rng[2],
+      output_directory = dir_out,
+      # output_filename = glue("{d_s$nms}_{ds_id}_multi-vars.nc"),
+      overwrite = T,
+      service = "timeseries",
+      disable_progress_bar = T,
+      # dry_run = T
+      # coordinates_selection_method="strict-inside",
+      # netcdf_compression_level=1, # 0 means no compression, and 9 is the highest level
+      # netcdf3_compatible
+    )
     nc <- as.character(nc)
-    
+
+
     # show output_filename with parameters embedded
-    # cat(glue("output_filename (basename): {basename(nc)}"))
+    cat(glue("output_filename (basename): {basename(nc)}"))
   }
 }
+
+#  1/15: Cordell Bank (CBNMS)                 ~ 17:21:34
+#  9/15: Monterey Bay (MBNMS)                 ~ 17:30:59
+#  1/15: Cordell Bank (CBNMS)                 ~ 17:45:43
+# 15/15: Monterey Bay - Mainland (MBNMS-main) ~ 17:56:51
 ```
 
 ## Show raster
@@ -192,10 +255,14 @@ Grabbing first netcdf file, show full metadata on variables and attributes:
 #| label: show_nc
 
 nms = "FKNMS"
-ply <- sanctuaries |> 
+ply <- sanctuaries |>
   filter(nms == !!nms)
-nc <- list.files(glue("data/copernicus/{nms}"), full.names = T)[1]
-
+# nc <- list.files(glue("data/copernicus/{nms}"), full.names = T)[1:6]
+nc <- dir_info(glue("data/copernicus/{nms}")) |> 
+  filter(modification_time > as.POSIXct("2025-12-01")) |> 
+  slice(1) |> 
+  pull(path)
+  
 o <- nc_open(nc)
 o
 ```
@@ -209,12 +276,16 @@ r <- rast(nc)
 r
 
 i <- 1
-cat(glue("
+cat(glue(
+  "
   index: {i}
   name: {names(r)[i]}
   time: {time(r[[i]])}
   varname: {varnames(r[[i]])}
-  longname: {longnames(r[[i]])}"))
+  longname: {longnames(r[[i]])}"
+))
+
+# glue("{year}/{var}.tif/{time}_{depth}")
 ```
 
 Plot the raster with the sanctuary:
@@ -222,14 +293,23 @@ Plot the raster with the sanctuary:
 ```{r}
 #| label: plot_rast
 
+# plot(r[[i]])
+r_1 <- r[[i]] |>
+  project(leaflet:::epsg3857, method = "bilinear")
+# plot(r_1)
+
 plet(
-  r[[i]], 
-  # main  = glue("{longnames(r[[i]])}\n{names(r)[i]}\n{time(r[[i]])}"), 
-  main  = glue("{longnames(r[[i]])}\nthetao_depth=0.5\n{time(r[[i]])}"), 
-  tiles = "Esri.OceanBasemap") |> 
+  # r[[i]],
+  r_1,
+  # main  = glue("{longnames(r[[i]])}\n{names(r)[i]}\n{time(r[[i]])}"),
+  main = glue("{longnames(r[[i]])}\nthetao_depth=0.5\n{time(r[[i]])}"),
+  tiles = "Esri.OceanBasemap",
+  fill_range = T
+) |>
   addPolygons(
-    data        = ply,
-    fillOpacity = 0.2)
+    data = ply,
+    fillOpacity = 0.2
+  )
 ```
 
 ## Summarize raster to sanctuary
@@ -238,44 +318,52 @@ plet(
 #| label: extract
 #| eval: false
 
-extract_tbl <- function(r, p, stat = "mean"){
-  terra::extract(r, p, fun = stat, na.rm=T) |>
-    pivot_longer(!ID, names_to = "var_it") |> 
+extract_tbl <- function(r, p, stat = "mean") {
+  terra::extract(r, p, fun = stat, na.rm = T) |>
+    pivot_longer(!ID, names_to = "var_it") |>
     mutate(
-      var  = str_replace(var_it, "_[0-9]+$", ""),
+      var = str_replace(var_it, "_[0-9]+$", ""),
       stat = !!stat,
-      time = time(r)) |> 
+      time = time(r)
+    ) |>
     select(var, time, stat, value)
 }
 
-ncs <- list.files("data/copernicus", "\\.nc$", recursive = T, full.names = T)
+# ncs <- list.files("data/copernicus", "\\.nc$", recursive = T, full.names = T)
+ncs <- dir_info(glue("data/copernicus"), regexp = "\\.nc$", recurse = T) |> 
+  filter(modification_time > as.POSIXct("2025-12-01")) |> 
+  pull(path)
 
-for (i in 1:length(ncs)){ # i=9
-  nc    <- ncs[i]
-  nms   <- str_replace(nc, ".*/copernicus/([A-z-]+)/(.+)_multi-vars.*", "\\1")
+for (i in 1:length(ncs)) {
+  # i=1
+  nc <- ncs[i]
+  nms <- str_replace(nc, ".*/copernicus/([A-z-]+)/(.+)_multi-vars.*", "\\1")
   ds_id <- str_replace(nc, ".*/copernicus/([A-z-]+)/(.+)_multi-vars.*", "\\2")
   message(glue("{i}/{length(ncs)}: nms:{nms}, ds:{ds_id}"))
-  
+
   r <- rast(nc)
   # plet(r[[1]])
-  p <- sanctuaries |> 
+  p <- sanctuaries |>
     filter(nms == !!nms)
-  
+
   d <- bind_rows(
     extract_tbl(r, p, "mean"),
-    extract_tbl(r, p, "sd")) |> 
+    extract_tbl(r, p, "sd")
+  ) |>
     mutate(
-      nms     = !!nms,
-      dataset = !!ds_id) |> 
+      nms = !!nms,
+      dataset = !!ds_id
+    ) |>
     relocate(nms, dataset)
-  
-  if (file.exists(results_csv)){
-    read_csv(results_csv) |> 
+
+  if (file.exists(results_csv)) {
+    read_csv(results_csv) |>
       bind_rows(d) |>
       group_by(nms, dataset, var, time, stat) |>
       summarize(
-        value   = last(value),
-        .groups = "drop") |>
+        value = last(value),
+        .groups = "drop"
+      ) |>
       arrange(nms, dataset, var, time, stat) |>
       write_csv(results_csv)
   } else {
@@ -288,9 +376,11 @@ for (i in 1:length(ncs)){ # i=9
 ```{r}
 #| label: show_ts
 
-results_url <- results_csv |> 
+results_url <- results_csv |>
   str_replace(
-    here(), "https://github.com/noaa-onms/eco-indicators/blob/main")
+    here(),
+    "https://github.com/noaa-onms/eco-indicators/blob/main"
+  )
 
 # show table
 read_csv(results_csv)
@@ -306,29 +396,51 @@ table of results: [`r basename(results_url)`](`r results_url`)
 
 d <- read_csv(results_csv)
 # table(d$var)
-# bottomT  mlotst  so_depth=0.49402499  thetao_depth=0.49402499 
+# bottomT  mlotst  so_depth=0.49402499  thetao_depth=0.49402499
 #   12288   12288                12288                    12288
+#                 bottomT                     CHL         CHL_uncertainty                   DIATO 
+#                   11820                   10170                   10170                   10170 
+#       DIATO_uncertainty                    DINO        DINO_uncertainty                   flags 
+#                   10170                   10170                   10170                   10170 
+#                   GREEN       GREEN_uncertainty                   HAPTO       HAPTO_uncertainty 
+#                   10170                   10170                   10170                   10170 
+#                   MICRO       MICRO_uncertainty                  mlotst                    NANO 
+#                   10170                   10170                   11820                   10170 
+#        NANO_uncertainty                    PICO        PICO_uncertainty                 PROCHLO 
+#                   10170                   10170                   10170                   10170 
+#     PROCHLO_uncertainty                  PROKAR      PROKAR_uncertainty     so_depth=0.49402499 
+#                   10170                   10170                   10170                   11820 
+# thetao_depth=0.49402499 
+#                   11820
 
-plot_var_facets <- function(nms, data){
+plot_var_facets <- function(nms, data) {
   png <- glue("figures/copernicus/{nms}.png")
-  data |> 
+  data |>
     filter(
-      nms == !!nms) |> 
+      nms == !!nms
+    ) |>
     mutate(
-      var = str_replace(var, "_depth=0.49402499", "_0.5m")) |> 
+      var = str_replace(var, "_depth=0.49402499", "_0.5m")
+    ) |>
     pivot_wider(
       names_from = stat,
-      values_from = value) |> 
-    ggplot(aes(x = time, y = mean, color = var)) + 
-    facet_wrap(~ var) +
-    geom_line() + 
-    geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = var), color = NA, alpha = 0.2) + 
-    theme(legend.position = "none") + 
-    facet_wrap(~var, scales = "free_y") + 
+      values_from = value
+    ) |>
+    ggplot(aes(x = time, y = mean, color = var)) +
+    facet_wrap(~var) +
+    geom_line() +
+    geom_ribbon(
+      aes(ymin = mean - sd, ymax = mean + sd, fill = var),
+      color = NA,
+      alpha = 0.2
+    ) +
+    theme(legend.position = "none") +
+    facet_wrap(~var, scales = "free_y") +
     labs(
       title = nms,
-      x = "Time", 
-      y = "Value")
+      x = "Time",
+      y = "Value"
+    )
   ggsave(png, width = 8, height = 6)
 }
 
@@ -343,13 +455,15 @@ sapply(sanctuaries$nms, plot_var_facets, data = d)
 #| results: asis
 
 for (nms in sanctuaries$nms) {
-  cat(glue::glue('
+  cat(glue::glue(
+    '
 ### {nms}
 
 ![](figures/copernicus/{nms}.png)
 
 
-'))
+'
+  ))
 }
 ```
 
