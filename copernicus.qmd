@@ -87,7 +87,8 @@ cmt <- import("copernicusmarine")
 # login
 pass <- readLines(pass_txt)
 stopifnot(
-  cmt$login(user, pass, force_overwrite = T)) # py_help(cmt$login)
+  cmt$login(user, pass, force_overwrite = T)
+) # py_help(cmt$login)
 # writes to ~/.copernicusmarine/.copernicusmarine-credentials
 ```
 
@@ -167,20 +168,40 @@ datasets <- list(
   # Plankton, multi-sensor (4 km), monthly
   "cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M" = list(
     vars = list(
-      "CHL", "CHL_uncertainty", "DIATO", "DIATO_uncertainty", "DINO", 
-      "DINO_uncertainty", "GREEN", "GREEN_uncertainty", "HAPTO", 
-      "HAPTO_uncertainty", "MICRO", "MICRO_uncertainty", "NANO", 
-      "NANO_uncertainty", "PICO", "PICO_uncertainty", "PROCHLO", 
-      "PROCHLO_uncertainty", "PROKAR", "PROKAR_uncertainty", "flags"),
+      "CHL",
+      "CHL_uncertainty",
+      "DIATO",
+      "DIATO_uncertainty",
+      "DINO",
+      "DINO_uncertainty",
+      "GREEN",
+      "GREEN_uncertainty",
+      "HAPTO",
+      "HAPTO_uncertainty",
+      "MICRO",
+      "MICRO_uncertainty",
+      "NANO",
+      "NANO_uncertainty",
+      "PICO",
+      "PICO_uncertainty",
+      "PROCHLO",
+      "PROCHLO_uncertainty",
+      "PROKAR",
+      "PROKAR_uncertainty",
+      "flags"
+    ),
     date_rng = c("1997-09-01T00:00:00", "2025-11-01T00:00:00"),
-    depth_rng = c(0, 0.5) ),
-  
+    depth_rng = c(0, 0.5)
+  ),
+
   # Primary production, multi-sensor (4 km), monthly
   "cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M" = list(
     vars = list("PP", "PP_uncertainty", "flags"),
     date_rng = c("1997-09-01T00:00:00", "2025-11-01T00:00:00"),
-    depth_rng = c(0, 0.5) ) )
-  
+    depth_rng = c(0, 0.5)
+  )
+)
+
 datasets |>
   toJSON(auto_unbox = T, pretty = T)
 ```
@@ -201,14 +222,16 @@ for (i in 1:nrow(sanctuaries)) {
 
   dir_out <- here(glue("{dir_cm}/{d_s$nms}"))
   dir.create(dir_out, showWarnings = F, recursive = T)
-  message(glue("{i}/{nrow(sanctuaries)}: {d_s$sanctuary} ({d_s$nms}) ~ {format(Sys.time(), '%H:%M:%S')}"))
+  message(glue(
+    "{i}/{nrow(sanctuaries)}: {d_s$sanctuary} ({d_s$nms}) : beg ~ {format(Sys.time(), '%H:%M:%S')}"
+  ))
 
   for (j in 1:length(datasets)) {
-    # j=2
+    # j=3
 
     ds_id <- names(datasets)[j]
     ds <- datasets[[j]]
-    message(glue("{j}/{length(datasets)}: {ds_id}"))
+    message(glue("  {j}/{length(datasets)}: {ds_id}", .trim = F))
 
     # py_help(cmt$subset)
     nc <- cmt$subset(
@@ -235,16 +258,15 @@ for (i in 1:nrow(sanctuaries)) {
     )
     nc <- as.character(nc)
 
-
     # show output_filename with parameters embedded
-    cat(glue("output_filename (basename): {basename(nc)}"))
+    # cat(glue("output_filename (basename): {basename(nc)}"))
+    message(glue("  : end ~ {format(Sys.time(), '%H:%M:%S')}", .trim = F))
   }
 }
 
-#  1/15: Cordell Bank (CBNMS)                 ~ 17:21:34
-#  9/15: Monterey Bay (MBNMS)                 ~ 17:30:59
-#  1/15: Cordell Bank (CBNMS)                 ~ 17:45:43
-# 15/15: Monterey Bay - Mainland (MBNMS-main) ~ 17:56:51
+# 20 min to complete:
+#  1/15: Cordell Bank (CBNMS) : beg                 ~ 22:42:10
+# 15/15: Monterey Bay - Mainland (MBNMS-main) : end ~ 23:02:34
 ```
 
 ## Show raster
@@ -258,11 +280,11 @@ nms = "FKNMS"
 ply <- sanctuaries |>
   filter(nms == !!nms)
 # nc <- list.files(glue("data/copernicus/{nms}"), full.names = T)[1:6]
-nc <- dir_info(glue("data/copernicus/{nms}")) |> 
-  filter(modification_time > as.POSIXct("2025-12-01")) |> 
-  slice(1) |> 
+nc <- dir_info(glue("data/copernicus/{nms}")) |>
+  filter(modification_time > as.POSIXct("2025-12-01")) |>
+  slice(1) |>
   pull(path)
-  
+
 o <- nc_open(nc)
 o
 ```
@@ -330,8 +352,8 @@ extract_tbl <- function(r, p, stat = "mean") {
 }
 
 # ncs <- list.files("data/copernicus", "\\.nc$", recursive = T, full.names = T)
-ncs <- dir_info(glue("data/copernicus"), regexp = "\\.nc$", recurse = T) |> 
-  filter(modification_time > as.POSIXct("2025-12-01")) |> 
+ncs <- dir_info(glue("data/copernicus"), regexp = "\\.nc$", recurse = T) |>
+  filter(modification_time > as.POSIXct("2025-12-01")) |>
   pull(path)
 
 for (i in 1:length(ncs)) {
@@ -398,20 +420,28 @@ d <- read_csv(results_csv)
 # table(d$var)
 # bottomT  mlotst  so_depth=0.49402499  thetao_depth=0.49402499
 #   12288   12288                12288                    12288
-#                 bottomT                     CHL         CHL_uncertainty                   DIATO 
-#                   11820                   10170                   10170                   10170 
-#       DIATO_uncertainty                    DINO        DINO_uncertainty                   flags 
-#                   10170                   10170                   10170                   10170 
-#                   GREEN       GREEN_uncertainty                   HAPTO       HAPTO_uncertainty 
-#                   10170                   10170                   10170                   10170 
-#                   MICRO       MICRO_uncertainty                  mlotst                    NANO 
-#                   10170                   10170                   11820                   10170 
-#        NANO_uncertainty                    PICO        PICO_uncertainty                 PROCHLO 
-#                   10170                   10170                   10170                   10170 
-#     PROCHLO_uncertainty                  PROKAR      PROKAR_uncertainty     so_depth=0.49402499 
-#                   10170                   10170                   10170                   11820 
-# thetao_depth=0.49402499 
+#                 bottomT                     CHL         CHL_uncertainty                   DIATO
+#                   11820                   10170                   10170                   10170
+#       DIATO_uncertainty                    DINO        DINO_uncertainty                   flags
+#                   10170                   10170                   10170                   10170
+#                   GREEN       GREEN_uncertainty                   HAPTO       HAPTO_uncertainty
+#                   10170                   10170                   10170                   10170
+#                   MICRO       MICRO_uncertainty                  mlotst                    NANO
+#                   10170                   10170                   11820                   10170
+#        NANO_uncertainty                    PICO        PICO_uncertainty                 PROCHLO
+#                   10170                   10170                   10170                   10170
+#     PROCHLO_uncertainty                  PROKAR      PROKAR_uncertainty     so_depth=0.49402499
+#                   10170                   10170                   10170                   11820
+# thetao_depth=0.49402499
 #                   11820
+
+# table(d$dataset, useNA = "ifany")
+#               cmems_mod_glo_phy_my_0.083deg_P1M-m
+#                                             47280
+# cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M
+#                                            213570
+#       cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M
+#                                             30510
 
 plot_var_facets <- function(nms, data) {
   png <- glue("figures/copernicus/{nms}.png")
