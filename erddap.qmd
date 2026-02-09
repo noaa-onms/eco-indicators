@@ -1,0 +1,91 @@
+---
+title: "ERDDAP Precipitation for Sanctuaries"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: true
+  warning: true
+  error: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+#| label: setup
+#| warning: false
+
+librarian::shelf(
+  dplyr,
+  DT,
+  fs,
+  glue,
+  here,
+  purrr,
+  readr,
+  stringr,
+  tidyr,
+  quiet = T)
+options(readr.show_col_types = F)
+
+dir_erddap_precip <- here("../climate-dashboard-app/data_local/erddap_precip")
+results_csv       <- here("data/erddap.csv")
+```
+
+## Read & transform
+
+Read all per-sanctuary per-year CSVs from `climate-dashboard-app/data_local/erddap_precip/` and consolidate into a single CSV matching the `copernicus.csv` format.
+
+```{r}
+#| label: read_transform
+
+nms_dirs <- dir_ls(dir_erddap_precip, type = "directory") |>
+  keep(\(x) !str_detect(basename(x), "-"))  # exclude MBNMS-david, MBNMS-main
+
+d <- map_dfr(nms_dirs, \(nms_dir) {
+  nms_code <- basename(nms_dir)
+  csvs     <- dir_ls(nms_dir, glob = "*.csv")
+  map_dfr(csvs, \(csv_path) {
+    read_csv(csv_path) |>
+      mutate(
+        nms     = nms_code,
+        dataset = "IMERG_monthly_global_precip",
+        var     = str_replace(lyr, "\\|.*", ""),
+        stat    = "mean",
+        value   = mean) |>
+      select(nms, dataset, var, time, stat, value)
+  })
+}) |>
+  arrange(nms, dataset, var, time, stat)
+
+write_csv(d, results_csv)
+```
+
+## Results
+
+```{r}
+#| label: show_results
+
+n_sanctuaries <- n_distinct(d$nms)
+time_min      <- min(d$time)
+time_max      <- max(d$time)
+n_rows        <- nrow(d)
+
+glue(
+  "Rows: {n_rows}
+   Sanctuaries: {n_sanctuaries} ({paste(sort(unique(d$nms)), collapse = ', ')})
+   Time range: {time_min} to {time_max}
+   Variables: {paste(unique(d$var), collapse = ', ')}
+   Stats: {paste(unique(d$stat), collapse = ', ')}
+   Datasets: {paste(unique(d$dataset), collapse = ', ')}")
+```
+
+```{r}
+#| label: show_table
+
+datatable(d)
+```
