@@ -15,6 +15,13 @@ editor_options:
   chunk_output_type: console
 ---
 
+<!--
+PROMPT to Claude CODE 2026-02-09:
+
+I fetched another dataset erddap_precip (see @/climate-dashboard-app/meta/erddap_precip.yml used as the main input parameter for @climate-dashboard-app/process/erddap.qmd, which gets initiated by @climate-dashboard-app/process/update_data.R) that I want to pull into the data for this project to look similar to @eco-indicators/data/copernicus.csv, so @eco-indicators/data/erddap.csv makes sense. Use the same column names to transform the data under @climate-dashboard-app/data_local/erddap_precip.
+-->
+
+
 ```{r}
 #| label: setup
 #| warning: false

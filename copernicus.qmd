@@ -586,6 +586,20 @@ for (nms in sanctuaries$nms) {
 }
 ```
 
+<!--
+PROMPT to Claude CODE 2026-02-09:
+
+There are some strange *_uncertainty measures from the [Global Ocean Colour (Copernicus-GlobColour), Bio-Geo-Chemical, L4 (monthly and interpolated) from Satellite Observations (1997-ongoing) | Copernicus Marine Service](https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/services) for all the sanctuaries (only showing CBNMS) showing up from @eco-indicators/copernicus.qmd inflecting to high values
+
+Review these documents to explain how these uncertainties are derived and possible explanations for these inflections:
+
+- [User Manual](https://documentation.marine.copernicus.eu/PUM/CMEMS-OC-PUM.pdf)
+- [Quality Information Document](https://documentation.marine.copernicus.eu/QUID/CMEMS-OC-QUID-009-101to104-111-113-116-118.pdf)
+- [Synthesis Quality Overview](https://documentation.marine.copernicus.eu/SQO/CMEMS-OC-SQO-009-101to104-111-113-116-118.pdf)
+
+Inject your findings at the end of this document @eco-indicators/copernicus.qmd, ie after displaying the plots in section "Show timeseries per sanctuary"
+-->
+
 :::
 
 ## Notes on PFT Uncertainty Variables
