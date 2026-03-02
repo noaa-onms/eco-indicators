@@ -330,6 +330,8 @@ CBNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,14.992
 CBNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,3.2606903226108286
 CBNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,0.4971750548032246
 CBNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,1.520530796853247
+CBNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,3.850902445477002
+CBNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,1.9472736362437248
 CINMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,27.492023760381013
 CINMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,237.5811605597154
 CINMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,62.97666759204506
@@ -661,6 +663,8 @@ CINMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,4.9696
 CINMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,0.5074635542971768
 CINMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,0.3711039313809029
 CINMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,1.489848059202103
+CINMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,0.1777075230464071
+CINMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,32.2164137939921
 CPNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,49.729058432410135
 CPNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,238.1136894345793
 CPNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,66.56080549063424
@@ -992,6 +996,8 @@ CPNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,10.869
 CPNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,2.657550215855687
 CPNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,0.4742773678191157
 CPNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,3.5332504300645717
+CPNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,0.05133923778909255
+CPNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,24.893359745108395
 FGBNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,334.3705911997755
 FGBNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,264.3841737516499
 FGBNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,39.22408474124132
@@ -1323,6 +1329,8 @@ FGBNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,8.398
 FGBNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,148.94040305028628
 FGBNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,17.016072456511008
 FGBNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,105.14218019877244
+FGBNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,85.67173182037497
+FGBNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,114.19747762491671
 FKNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,87.51628393241648
 FKNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,255.9318883079096
 FKNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,101.67682638346166
@@ -1654,6 +1662,8 @@ FKNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,16.496
 FKNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,52.097623071509595
 FKNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,167.40937145942607
 FKNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,55.792081207553835
+FKNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,81.30604096645092
+FKNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,266.13392979166224
 GFNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,207.6779764946184
 GFNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,356.77197928374517
 GFNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,111.83870235567753
@@ -1985,6 +1995,8 @@ GFNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,21.979
 GFNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,5.199258687449966
 GFNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,0.9071254539697824
 GFNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,1.909443515595744
+GFNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,1.944616580077716
+GFNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,5.981089292839321
 GRNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,122.51511796142192
 GRNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,331.59238950394933
 GRNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,74.56350784174585
@@ -2316,6 +2328,8 @@ GRNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,63.622
 GRNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,267.12206780963953
 GRNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,111.38536053586044
 GRNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,62.85877199948269
+GRNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,261.93274909115274
+GRNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,42.23022076777757
 HIHWNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,14.951039381458742
 HIHWNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,5.1177875546233675
 HIHWNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,7.5357124469219325
@@ -2647,6 +2661,8 @@ HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,34.9
 HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,20.01852070942541
 HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,19.303435121515516
 HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,12.52553304901329
+HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,11.533285262560153
+HIHWNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,17.21984905081423
 MBNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,110.75899215589556
 MBNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,347.44879411384903
 MBNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,61.68610593999643
@@ -2978,6 +2994,8 @@ MBNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,19.351
 MBNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,3.3442353497067856
 MBNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,0.8972115403780839
 MBNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,3.028156369341794
+MBNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,0.45265163306563394
+MBNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,13.40602842000146
 MNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,246.84782574146772
 MNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,234.19981548756144
 MNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,115.24321449965986
@@ -3309,6 +3327,8 @@ MNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,20.2810
 MNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,409.4570612540042
 MNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,88.3773987834108
 MNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,108.8878182764511
+MNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,249.23268254811737
+MNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,123.62343951027164
 NMSAS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,304.3798823268061
 NMSAS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,42.29350159060793
 NMSAS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,297.4314815457987
@@ -3640,6 +3660,8 @@ NMSAS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,53.842
 NMSAS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,321.49263413062107
 NMSAS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,46.292247837575346
 NMSAS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,162.04350345735506
+NMSAS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,61.77998463772878
+NMSAS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,82.68998437078592
 OCNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,302.37384618674344
 OCNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,362.8482035265404
 OCNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,126.84024958352624
@@ -3971,6 +3993,8 @@ OCNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,95.317
 OCNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,117.20378109235664
 OCNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,20.47730632035786
 OCNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,12.226397447987049
+OCNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,59.93725654081467
+OCNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,88.2907593995762
 SBNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,100.78013764202431
 SBNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,70.23125754438811
 SBNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,58.87711292285184
@@ -4302,6 +4326,8 @@ SBNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,125.46
 SBNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,90.45723842313318
 SBNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,41.81646339806625
 SBNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,84.24107232235511
+SBNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,46.73746573295372
+SBNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,86.64181331974811
 TBNMS,IMERG_monthly_global_precip,precipitation,1998-01-01T00:00:00Z,mean,33.85453310306227
 TBNMS,IMERG_monthly_global_precip,precipitation,1998-02-01T00:00:00Z,mean,11.995189844310602
 TBNMS,IMERG_monthly_global_precip,precipitation,1998-03-01T00:00:00Z,mean,44.455882819789736
@@ -4633,3 +4659,5 @@ TBNMS,IMERG_monthly_global_precip,precipitation,2025-04-01T00:00:00Z,mean,108.99
 TBNMS,IMERG_monthly_global_precip,precipitation,2025-05-01T00:00:00Z,mean,94.7332167779698
 TBNMS,IMERG_monthly_global_precip,precipitation,2025-06-01T00:00:00Z,mean,126.8165718537837
 TBNMS,IMERG_monthly_global_precip,precipitation,2025-07-01T00:00:00Z,mean,150.12535646632182
+TBNMS,IMERG_monthly_global_precip,precipitation,2025-08-01T00:00:00Z,mean,158.87479562387594
+TBNMS,IMERG_monthly_global_precip,precipitation,2025-09-01T00:00:00Z,mean,75.07419604732357
