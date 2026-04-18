@@ -254,6 +254,56 @@ datasets |>
   jsonedit() # view in browser
 ```
 
+## Dataset Variables
+
+```{r}
+#| label: dataset_vars
+
+vars_csv <- here("data/copernicus_variables.csv")
+
+get_var_coord_range <- function(coord_df, coord_name) {
+  if (!is.data.frame(coord_df)) return(c(NA_real_, NA_real_))
+  i <- which(coord_df$coordinate_id == coord_name)
+  if (length(i) == 0) return(c(NA_real_, NA_real_))
+  vals <- as.numeric(coord_df$values[[i]])
+  c(min(vals, na.rm = T), max(vals, na.rm = T))
+}
+
+get_dataset_vars_info <- function(dataset_id) {
+  desc     <- get_dataset_description(dataset_id)
+  product  <- pluck(desc, "products") |> as_tibble() |> slice(1)
+  services <- pluck(
+    desc, "products", "datasets", 1,
+    "versions", 1, "parts", 1, "services", 1)
+  i_ts     <- which(services$service_name == "arco-time-series")
+  vars     <- pluck(services, "variables", i_ts)
+  times    <- get_dataset_times(desc)
+
+  tibble(
+    dataset_id    = dataset_id,
+    product_id    = product$product_id,
+    product_title = product$title,
+    time_min      = as.character(times$min),
+    time_max      = as.character(times$max),
+    variable      = vars$short_name,
+    standard_name = vars$standard_name,
+    units         = vars$units,
+    depth_min     = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "depth")[1]),
+    depth_max     = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "depth")[2]),
+    longitude_min = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "longitude")[1]),
+    longitude_max = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "longitude")[2]),
+    latitude_min  = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "latitude")[1]),
+    latitude_max  = map_dbl(vars$coordinates, \(c) get_var_coord_range(c, "latitude")[2])
+  )
+}
+
+vars_info <- map_dfr(names(datasets), get_dataset_vars_info)
+
+write_csv(vars_info, vars_csv)
+
+datatable(vars_info, options = list(scrollX = TRUE))
+```
+
 ### Iterate over sanctuaries & datasets to subset
 
 ```{r}
@@ -599,6 +649,67 @@ Review these documents to explain how these uncertainties are derived and possib
 
 Inject your findings at the end of this document @eco-indicators/copernicus.qmd, ie after displaying the plots in section "Show timeseries per sanctuary"
 -->
+
+:::
+
+## Show timeseries per sanctuary, without uncertainty
+
+```{r}
+#| label: plot_ts_without_uncertainty
+#| eval: true
+
+plot_var_facets_without_uncertainty <- function(nms, data) {
+  png <- glue("figures/copernicus/{nms}_without_uncertainty.png")
+  data |>
+    filter(
+      nms == !!nms,
+      !str_ends(var, "_uncertainty")
+    ) |>
+    mutate(
+      var = str_replace(var, "_depth=0.49402499", "_0.5m")
+    ) |>
+    pivot_wider(
+      names_from  = stat,
+      values_from = value
+    ) |>
+    ggplot(aes(x = time, y = mean, color = var)) +
+    facet_wrap(~var) +
+    geom_line() +
+    geom_ribbon(
+      aes(ymin = mean - sd, ymax = mean + sd, fill = var),
+      color = NA,
+      alpha = 0.2
+    ) +
+    theme(legend.position = "none") +
+    facet_wrap(~var, scales = "free_y") +
+    labs(
+      title = nms,
+      x     = "Time",
+      y     = "Value"
+    )
+  ggsave(png, width = 8, height = 6)
+}
+
+sapply(sanctuaries$nms, plot_var_facets_without_uncertainty, data = d)
+```
+
+::: {.panel-tabset}
+
+```{r}
+#| results: asis
+
+for (nms in sanctuaries$nms) {
+  cat(glue::glue(
+    '
+### {nms}
+
+![](figures/copernicus/{nms}_without_uncertainty.png)
+
+
+'
+  ))
+}
+```
 
 :::
 
