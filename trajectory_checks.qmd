@@ -912,6 +912,84 @@ d_step |>
   kable(caption = "Annual surface-temperature anomaly, 1993-2025 (vs 1993-2012 monthly climatology): single step vs linear trend")
 ```
 
+Is a shared step distinguishable from a linear warming trend plus red noise? Surrogates keep each
+sanctuary's linear trend, the spectrum of its residuals and the correlations among sanctuaries
+(common random phases), and contain no step.
+
+```{r}
+#| label: sst_step_null
+
+step_null_csv <- file.path(dir_chk, "sst_step_null.csv")
+X_sst <- d_sst |>
+  select(nms, yr, anom) |>
+  pivot_wider(names_from = nms, values_from = anom) |>
+  arrange(yr)
+yrs   <- X_sst$yr
+X_sst <- as.matrix(X_sst[, NMS_ORD])
+n_y   <- nrow(X_sst)
+cand  <- 6:(n_y - 4)
+
+# best single-step year and delta bic (trend minus step; positive favors a step)
+step_stat <- function(x) {
+  bic    <- \(rss, k) n_y * log(rss / n_y) + k * log(n_y)
+  rss_tr <- sum(resid(lm(x ~ yrs))^2)
+  rss_st <- sapply(cand, \(i) sum((x[1:(i - 1)] - mean(x[1:(i - 1)]))^2) + sum((x[i:n_y] - mean(x[i:n_y]))^2))
+  j      <- which.min(rss_st)
+  c(year = yrs[cand[j]], dbic = bic(rss_tr, 3) - bic(rss_st[j], 4))
+}
+obs_step <- apply(X_sst, 2, step_stat)
+
+if (!file.exists(step_null_csv)) {
+  set.seed(42)
+  fit_tr <- lm(X_sst ~ yrs)
+  Tr     <- fitted(fit_tr)
+  R      <- resid(fit_tr)
+  sur    <- function() {
+    k   <- floor((n_y - 1) / 2)
+    ph  <- runif(k, 0, 2 * pi)
+    rot <- rep(1 + 0i, n_y)
+    rot[2:(k + 1)]       <- exp(1i * ph)
+    rot[n_y:(n_y - k + 1)] <- exp(-1i * ph)
+    Tr + Re(mvfft(mvfft(R) * rot, inverse = TRUE)) / n_y
+  }
+  map_dfr(seq_len(5000), \(b) {
+    S <- apply(sur(), 2, step_stat)
+    as_tibble(as.list(S["dbic", ])) |>
+      mutate(
+        rep     = b,
+        modal   = max(table(S["year", ])),
+        n_step  = sum(S["dbic", ] > 2),
+        n_2014  = sum(S["year", ] == 2014))
+  }) |>
+    write_csv(step_null_csv)
+}
+d_sn <- read_csv(step_null_csv)
+
+tibble(
+  nms          = NMS_ORD,
+  `step year`  = obs_step["year", ],
+  `delta BIC`  = round(obs_step["dbic", ], 1),
+  `surrogate p` = map_dbl(NMS_ORD, \(x) mean(d_sn[[x]] >= obs_step["dbic", x]))) |>
+  mutate(`surrogate p` = round(`surrogate p`, 3)) |>
+  kable(caption = "Step vs trend per sanctuary: share of trend-plus-red-noise surrogates with a delta BIC at least as large as observed")
+
+obs_modal <- max(table(obs_step["year", ]))
+obs_nstep <- sum(obs_step["dbic", ] > 2)
+tibble(
+  statistic = c(
+    "sanctuaries sharing the modal step year",
+    "sanctuaries where BIC prefers a step (delta BIC > 2)",
+    "sum of delta BIC over sanctuaries"),
+  observed  = c(obs_modal, obs_nstep, round(sum(obs_step["dbic", ]), 1)),
+  `surrogate median` = c(median(d_sn$modal), median(d_sn$n_step), round(median(rowSums(d_sn[, NMS_ORD])), 1)),
+  `surrogate 95th percentile` = c(
+    quantile(d_sn$modal, 0.95), quantile(d_sn$n_step, 0.95), round(quantile(rowSums(d_sn[, NMS_ORD]), 0.95), 1)),
+  `surrogate p` = c(
+    mean(d_sn$modal >= obs_modal), mean(d_sn$n_step >= obs_nstep),
+    mean(rowSums(d_sn[, NMS_ORD]) >= sum(obs_step["dbic", ])))) |>
+  kable(caption = "System-level test of a shared step (5000 surrogates)")
+```
+
 ```{r}
 #| label: fig_sst_step
 #| fig-width: 10
