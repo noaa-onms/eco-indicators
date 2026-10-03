@@ -1,0 +1,731 @@
+---
+title: "Manuscript figures: environmental trajectories of 14 National Marine Sanctuaries"
+subtitle: "Figures and tables for the EcoIndicators Synthesis manuscript, drawn from the outputs of trajectories.qmd"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+editor_options:
+  chunk_output_type: console
+---
+
+<!--
+PROMPT to Claude CODE 2026-10-03 (abridged):
+
+Proceed with the environmental trajectory approach and focus on what is most tractable and relevant
+from a resource management perspective (e.g., Sanctuary Condition Report questions, and mitigation),
+along with correspondence with known events. One of the biggest tricks in presenting ordination studies
+is effective visualization and summary of so many complex factors and inputs: go the extra mile being as
+clear and concise as possible. Run any code reproducibly in the GitHub repo.
+-->
+
+This notebook only draws. Every number comes from the CSVs written by [state](state.html),
+[events](events.html), [context](context.html) and [trajectories](trajectories.html). Figures are saved
+to `figures/manuscript/` at 300 dpi.
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  dplyr, forcats, ggplot2, ggrepel, glue, here, knitr, lubridate, patchwork,
+  purrr, readr, rnaturalearth, scales, sf, stringr, tibble, tidyr,
+  quiet = T)
+options(readr.show_col_types = F)
+sf_use_s2(FALSE)
+
+# paths ----
+dir_trj <- here("data/trajectories")
+dir_evt <- here("data/events")
+dir_ctx <- here("data/context")
+dir_fig <- here("figures/manuscript")
+dir.create(dir_fig, showWarnings = F, recursive = T)
+rd <- \(f, dir = dir_trj) read_csv(file.path(dir, f))
+
+# constants ----
+WIN  <- as.Date(c("2003-01-01", "2025-09-01"))
+BASE <- as.Date(c("2003-01-01", "2012-12-01"))
+VARS <- c("sst", "sbt", "sss", "mld", "chl", "precip")
+VAR_LAB <- c(
+  sst    = "Surface\ntemperature",
+  sbt    = "Seafloor\ntemperature",
+  sss    = "Salinity",
+  mld    = "Mixed-layer\ndepth",
+  chl    = "Chlorophyll",
+  precip = "Precipitation")
+VAR_LAB1 <- str_replace(VAR_LAB, "\n", " ") |> setNames(names(VAR_LAB))
+NMS <- tribble(
+  ~nms,      ~name,                             ~region,
+  "OCNMS",   "Olympic Coast",                   "West Coast",
+  "GFNMS",   "Greater Farallones",              "West Coast",
+  "CBNMS",   "Cordell Bank",                    "West Coast",
+  "MBNMS",   "Monterey Bay",                    "West Coast",
+  "CPNMS",   "Chumash Heritage",                "West Coast",
+  "CINMS",   "Channel Islands",                 "West Coast",
+  "PNMS",    "Papahānaumokuākea",               "Pacific Islands",
+  "HIHWNMS", "Hawaiian Islands Humpback Whale", "Pacific Islands",
+  "NMSAS",   "American Samoa",                  "Pacific Islands",
+  "FGBNMS",  "Flower Garden Banks",             "Southeast and Gulf",
+  "FKNMS",   "Florida Keys",                    "Southeast and Gulf",
+  "GRNMS",   "Gray's Reef",                     "Southeast and Gulf",
+  "MNMS",    "Monitor",                         "Northeast",
+  "SBNMS",   "Stellwagen Bank",                 "Northeast") |>
+  mutate(
+    name   = fct_inorder(name),
+    region = fct_inorder(region),
+    short  = recode(as.character(name), "Hawaiian Islands Humpback Whale" = "Hawaiian Islands"))
+
+# plot theme: recessive chrome, thin marks, text in ink (never in a data color) ----
+PAL <- list(
+  surface = "#fcfcfb", ink  = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", wash = "#f0efec", blue  = "#2a78d6")
+PAL_DIV  <- c("#104281", "#2a78d6", "#9ec5f4", "#f0efec", "#f3b3ad", "#e34948", "#8f1d1c")
+PAL_BAND <- c("sub-annual" = "#86b6ef", "interannual" = "#3987e5", "decadal" = "#1c5cab", "trend-like" = "#0d366b")
+PAL_KIND <- c(warm = "#e34948", cold = "#2a78d6", other = "#1baf7a", inside = "#d4d3cd")
+PAL_REG  <- c("West Coast" = "#2a78d6", "Pacific Islands" = "#eb6834", "Southeast and Gulf" = "#1baf7a", "Northeast" = "#4a3aa7")
+
+theme_ms <- function(base_size = 9) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background       = element_rect(fill = PAL$surface, color = NA),
+      panel.background      = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major      = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor      = element_blank(),
+      axis.text             = element_text(color = PAL$muted),
+      axis.title            = element_text(color = PAL$ink2),
+      plot.title            = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle         = element_text(color = PAL$ink2),
+      plot.caption          = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position   = "plot",
+      plot.caption.position = "plot",
+      strip.text            = element_text(color = PAL$ink, face = "bold", hjust = 0),
+      legend.position       = "top",
+      legend.justification  = "left",
+      legend.title          = element_text(color = PAL$ink2),
+      legend.text           = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 300, bg = PAL$surface)
+  p
+}
+arrow_of <- \(delta) case_when(delta >= 10 ~ "↗", delta <= -10 ~ "↘", T ~ "→")
+```
+
+## Data
+
+```{r}
+#| label: data
+
+z    <- rd("z_monthly.csv")
+dep  <- rd("departure_monthly.csv")
+ep   <- rd("exceedance_period.csv")
+ea   <- rd("exceedance_annual.csv")
+sv   <- rd("shift_by_var.csv")
+sc   <- rd("scorecard.csv")
+evs  <- rd("events_scored.csv") |> rename(event = name)
+evt  <- rd("events_test.csv")
+pcl  <- rd("pca_loadings.csv")
+pca  <- rd("pca_scores_annual.csv")
+bnd  <- rd("aem_bands.csv")
+opt  <- \(f, dir = dir_trj) if (file.exists(file.path(dir, f))) rd(f, dir) else NULL
+mds  <- opt("modes_single.csv")
+mdt  <- opt("modes_total.csv")
+mhw  <- opt("mhw_monthly.csv", dir_evt)
+sens <- opt("sensitivity.csv")
+crs  <- rd("condition_reports.csv", dir_ctx)
+
+# which kind of variable carries each month's departure: the contributions
+# c_j = z_j * (S^-1 z)_j sum to the squared distance; "warm"/"cold" when the two temperature
+# variables carry more than the other variables together
+dom <- z |>
+  select(nms, date, var, z) |>
+  pivot_wider(names_from = var, values_from = z) |>
+  group_by(nms) |>
+  group_modify(\(g, k) {
+    v  <- intersect(VARS, names(g)[colSums(!is.na(g)) > 0])
+    Z  <- as.matrix(g[, v])
+    S  <- cov(Z[g$date >= BASE[1] & g$date <= BASE[2], ])
+    C  <- Z * t(solve(S, t(Z)))
+    vt <- intersect(c("sst", "sbt"), v)
+    th <- rowSums(C[, vt, drop = F])
+    tibble(
+      date = g$date,
+      kind = if_else(th >= rowSums(C) - th, if_else(rowMeans(Z[, vt, drop = F]) >= 0, "warm", "cold"), "other"))
+  }) |>
+  ungroup()
+dep <- dep |>
+  left_join(dom, by = c("nms", "date")) |>
+  left_join(NMS, by = "nms") |>
+  mutate(kind = factor(if_else(exceed, kind, "inside"), names(PAL_KIND)))
+```
+
+## Figure 1. Sanctuaries
+
+```{r}
+#| label: fig_map
+#| fig-width: 7.2
+#| fig-height: 4.2
+
+# equal earth (equal-area) centred near 120 W; labels are hand placed (lon, lat, hjust)
+FIG_CRS   <- "+proj=eqearth +lon_0=-120 +datum=WGS84 +units=m"
+FIG_OTHER <- tribble(
+  ~name,                         ~lat,  ~lon,    ~llon, ~llat, ~hj,
+  "Thunder Bay",                 45.0,  -83.3,   -79,   52,    0.5,
+  "Wisconsin Shipwreck Coast",   43.9,  -87.6,   -99,   36.5,  0.5,
+  "Lake Ontario",                43.6,  -76.6,   -70,   49,    0,
+  "Mallows Bay-\nPotomac River", 38.47, -77.26,  -71,   39.6,  0)
+FIG_LAB <- tribble(
+  ~nms,      ~llon,  ~llat, ~hj,
+  "OCNMS",   -131,   49.5,  1,
+  "GFNMS",   -128,   43.5,  1,
+  "CBNMS",   -128,   40.2,  1,
+  "MBNMS",   -128,   36.9,  1,
+  "CPNMS",   -128,   33.6,  1,
+  "CINMS",   -128,   30.3,  1,
+  "PNMS",    -179,   31.5,  0,
+  "HIHWNMS", -152.5, 17.5,  0,
+  "NMSAS",   -167,   -14,   0,
+  "FGBNMS",  -99,    21.5,  0.5,
+  "FKNMS",   -76,    22,    0,
+  "GRNMS",   -73,    30.5,  0,
+  "MNMS",    -68,    36.5,  0,
+  "SBNMS",   -66,    46,    0)
+to_xy <- function(d, lon, lat, nm) {
+  xy <- st_as_sf(d, coords = c(lon, lat), crs = 4326, remove = F) |> st_transform(FIG_CRS) |> st_coordinates()
+  d[[nm[1]]] <- xy[, 1]
+  d[[nm[2]]] <- xy[, 2]
+  d
+}
+
+fig_map <- function(geojson = c(here("data/sanctuaries.geojson"), here("data/state/pnms.geojson"))) {
+  # centroids are taken after projecting, so the two parts of papahanaumokuakea (split at the
+  # antimeridian) sit side by side
+  cen <- map(geojson, \(f) read_sf(f) |> select(nms)) |>
+    bind_rows() |>
+    filter(nms %in% NMS$nms) |>
+    st_make_valid() |>
+    st_transform(FIG_CRS) |>
+    st_centroid()
+  an <- cen |>
+    st_drop_geometry() |>
+    mutate(x = st_coordinates(cen)[, 1], y = st_coordinates(cen)[, 2]) |>
+    left_join(NMS, by = "nms") |>
+    left_join(FIG_LAB, by = "nms") |>
+    to_xy("llon", "llat", c("lx", "ly"))
+  ot <- FIG_OTHER |>
+    to_xy("lon", "lat", c("x", "y")) |>
+    to_xy("llon", "llat", c("lx", "ly"))
+  box  <- st_as_sfc(st_bbox(c(xmin = -180, xmax = -20, ymin = -40, ymax = 70), crs = 4326))
+  land <- ne_countries(scale = "medium", returnclass = "sf") |>
+    st_make_valid() |>
+    st_intersection(box) |>
+    st_transform(FIG_CRS)
+
+  # extent: project the lon/lat window, then pad to the figure aspect (7.2 x 4.2)
+  g   <- expand.grid(lon = seq(-180, -40, 2), lat = seq(-20, 56, 2)) |>
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) |>
+    st_transform(FIG_CRS) |>
+    st_coordinates()
+  xr  <- range(g[, 1])
+  yr  <- range(g[, 2])
+  asp <- 7.2 / 4.2
+  if (diff(xr) / diff(yr) < asp) xr <- mean(xr) + c(-1, 1) * diff(yr) * asp / 2 else yr <- mean(yr) + c(-1, 1) * diff(xr) / asp / 2
+  lg  <- tibble(x = xr[1] + 0.36 * diff(xr), y = yr[1] + c(9e5, 4.5e5))
+
+  ggplot() +
+    geom_sf(data = land, fill = "#e9e8e3", color = NA) +
+    geom_point(data = ot, aes(x, y), shape = 21, size = 1.6, stroke = 0.4, color = PAL$muted, fill = NA) +
+    geom_segment(data = ot, aes(x = x, y = y, xend = lx, yend = ly), color = PAL$axis, linewidth = 0.2) +
+    geom_text(data = ot, aes(lx, ly, label = name, hjust = hj), size = 2.4, lineheight = 0.85, color = PAL$muted) +
+    geom_segment(data = an, aes(x = x, y = y, xend = lx, yend = ly), color = PAL$axis, linewidth = 0.2) +
+    geom_text(data = an, aes(lx, ly, label = name, hjust = hj), size = 2.9, color = PAL$ink) +
+    geom_point(data = an, aes(x, y), shape = 21, size = 2.4, stroke = 0.5, fill = PAL$blue, color = PAL$surface) +
+    geom_point(data = lg[1, ], aes(x, y), shape = 21, size = 2.4, stroke = 0.5, fill = PAL$blue, color = PAL$surface) +
+    geom_point(data = lg[2, ], aes(x, y), shape = 21, size = 1.6, stroke = 0.4, color = PAL$muted, fill = NA) +
+    annotate("text", x = lg$x[1] + 1.5e5, y = lg$y[1], label = "analyzed (n = 14)", hjust = 0, size = 2.9, color = PAL$ink) +
+    annotate("text", x = lg$x[2] + 1.5e5, y = lg$y[2], label = "not analyzed (n = 4)", hjust = 0, size = 2.6, color = PAL$muted) +
+    coord_sf(crs = FIG_CRS, xlim = xr, ylim = yr, expand = F) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = PAL$surface, color = NA), plot.margin = margin(4, 4, 4, 4))
+}
+save_fig(fig_map(), "fig1_map.png", 7.2, 4.2)
+```
+
+## Figure 2. Three trajectories against documented events
+
+```{r}
+#| label: fig_cases
+#| fig-width: 9.6
+#| fig-height: 7.2
+
+CASES  <- c("MBNMS", "FKNMS", "HIHWNMS")
+TRACKS <- c("Distance from\nbaseline state", VAR_LAB, "Heatwave and\ncold-spell days")
+ev_short <- function(name, type, d0, d1) {
+  y0  <- year(d0)
+  y1  <- year(d1)
+  yrs <- if_else(y0 == y1, as.character(y0), glue("{y0}–{str_sub(y1, 3, 4)}"))
+  what <- case_when(
+    str_detect(name, "(Hurricane|Typhoon|Cyclone|Tropical Storm) [A-Z][a-z]+") ~ str_extract(name, "(Hurricane|Typhoon|Cyclone|Tropical Storm) [A-Z][a-z]+"),
+    str_detect(name, "mortality") ~ "mortality event",
+    type == "heatwave"   ~ "heatwave",
+    type == "cold"       ~ "cold spell",
+    type == "enso"       ~ if_else(str_detect(name, "Niña|Nina"), "La Niña", "El Niño"),
+    type == "freshwater" ~ "freshwater",
+    type == "hab"        ~ "algal bloom",
+    T                    ~ type)
+  glue("{yrs} {what}")
+}
+ev2 <- evs |>
+  filter(nms %in% CASES, as.Date(date_end) >= WIN[1], as.Date(date_start) <= WIN[2]) |>
+  mutate(
+    x0   = pmax(as.Date(date_start), WIN[1]),
+    x1   = pmax(pmin(as.Date(date_end), WIN[2]), x0 + 45),
+    lab  = ev_short(event, type, as.Date(date_start), as.Date(date_end))) |>
+  left_join(NMS, by = "nms") |>
+  arrange(nms, x0) |>
+  group_by(nms) |>
+  mutate(row = (row_number() - 1) %% 3) |>
+  ungroup()
+tr_dist <- dep |>
+  filter(nms %in% CASES) |>
+  transmute(nms, name, date, track = TRACKS[1], y = pmin(sigma_cv, 5), fill = as.character(kind))
+tr_var <- z |>
+  filter(nms %in% CASES, var %in% VARS) |>
+  left_join(NMS, by = "nms") |>
+  transmute(nms, name, date, track = VAR_LAB[var], y = pmax(pmin(z, 4), -4), fill = if_else(z >= 0, "pos", "neg"))
+tr_mhw <- if (is.null(mhw)) NULL else mhw |>
+  filter(nms %in% CASES, date >= WIN[1], date <= WIN[2]) |>
+  left_join(NMS, by = "nms") |>
+  select(nms, name, date, mhw_days, mcs_days) |>
+  pivot_longer(c(mhw_days, mcs_days), names_to = "k", values_to = "y") |>
+  transmute(nms, name, date, track = TRACKS[8], y = if_else(k == "mcs_days", -y, y), fill = if_else(k == "mcs_days", "neg", "pos"))
+d2 <- bind_rows(tr_dist, tr_var, tr_mhw) |>
+  mutate(
+    track = factor(track, TRACKS),
+    name  = factor(name, levels(NMS$name)[match(CASES, NMS$nms)]))
+ev2 <- ev2 |> mutate(name = factor(name, levels(d2$name)))
+ref2 <- tibble(
+  track = factor(c(TRACKS[1], rep(VAR_LAB, each = 2)), TRACKS),
+  y     = c(2, rep(c(-2, 2), 6)))
+# only the events expected to register are labeled; controls are drawn as lighter, unlabeled bands
+lab2 <- ev2 |>
+  filter(resolvable) |>
+  group_by(nms) |>
+  mutate(row = (row_number() - 1) %% 2) |>
+  group_by(nms, row) |>
+  mutate(crowded = row_number() < n()) |>
+  ungroup() |>
+  mutate(
+    track = factor(TRACKS[1], TRACKS),
+    y     = 6.1 + 1.25 * row,
+    right = x0 > as.Date("2021-01-01") | crowded,
+    lx    = if_else(right, x1, x0),
+    hj    = if_else(right, 1, 0))
+
+p2 <- ggplot(d2, aes(date, y)) +
+  geom_rect(
+    data = ev2, aes(xmin = x0, xmax = x1, ymin = -Inf, ymax = Inf, alpha = resolvable),
+    fill = PAL$ink2, inherit.aes = F) +
+  geom_col(aes(fill = fill), width = 31) +
+  geom_hline(data = ref2, aes(yintercept = y), color = PAL$ink2, linewidth = 0.2) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.2) +
+  geom_text(data = lab2, aes(x = lx, y = y, label = lab, hjust = hj), size = 2.35, color = PAL$ink, inherit.aes = F) +
+  facet_grid(rows = vars(track), cols = vars(name), scales = "free_y", switch = "y") +
+  scale_fill_manual(
+    values = c(PAL_KIND, pos = "#e34948", neg = "#2a78d6"), guide = "none") +
+  scale_alpha_manual(values = c(`TRUE` = 0.16, `FALSE` = 0.07), guide = "none") +
+  scale_x_date(expand = c(0, 0), limits = c(WIN[1] - 20, WIN[2] + 20), breaks = as.Date(paste0(seq(2004, 2024, 4), "-01-01")), date_labels = "%Y") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.02, 0.04)),
+    breaks = \(l) if (max(abs(l)) > 12) c(-30, 0, 30) else if (l[1] < -0.5) c(-2, 0, 2) else c(0, 2, 4)) +
+  labs(x = NULL, y = NULL) +
+  coord_cartesian(clip = "off") +
+  theme_ms(9) +
+  theme(
+    strip.placement   = "outside",
+    strip.text.y.left = element_text(angle = 0, hjust = 1, face = "plain", size = 8, lineheight = 0.9),
+    strip.text.x      = element_text(size = 9.5),
+    panel.grid.major  = element_blank(),
+    panel.spacing.y   = unit(4, "pt"),
+    panel.spacing.x   = unit(12, "pt"),
+    axis.text.y       = element_text(size = 6))
+save_fig(p2, "fig2_cases.png", 9.6, 7.2)
+```
+
+## Figure 3. Monthly departure from baseline in all sanctuaries
+
+```{r}
+#| label: fig_departure
+#| fig-width: 9
+#| fig-height: 9
+
+lab3 <- sc |>
+  left_join(NMS, by = "nms", suffix = c(".sc", "")) |>
+  mutate(lab = glue("{round(e_2021_2025)}% {arrow_of(delta)}"))
+ev3 <- evs |>
+  filter(resolvable, !is.na(sigma_max)) |>
+  mutate(
+    x0 = pmax(as.Date(date_start), WIN[1]),
+    x1 = pmin(as.Date(date_end), WIN[2]),
+    x1 = pmax(x1, x0 + 60)) |>
+  left_join(NMS, by = "nms")
+hdr3 <- tibble(name = factor(levels(NMS$name)[1], levels(NMS$name)))
+
+p3 <- ggplot(dep, aes(date, pmin(sigma_cv, 5))) +
+  annotate("rect", xmin = BASE[1] - 15, xmax = BASE[2] + 15, ymin = -Inf, ymax = Inf, fill = PAL$wash) +
+  geom_col(aes(fill = kind), width = 31) +
+  annotate("segment", x = WIN[1] - 15, xend = WIN[2] + 15, y = 2, yend = 2, color = PAL$ink2, linewidth = 0.25) +
+  geom_segment(data = ev3, aes(x = x0, xend = x1, y = 5.7, yend = 5.7), color = PAL$ink, linewidth = 1.1, inherit.aes = F) +
+  geom_text(data = lab3, aes(x = as.Date("2026-02-01"), y = 2.5, label = lab), hjust = 0, size = 3, color = PAL$ink, inherit.aes = F) +
+  geom_text(data = hdr3, aes(x = BASE[1] + 60, y = 4.6, label = "baseline 2003–2012"), hjust = 0, size = 2.5, color = PAL$muted, inherit.aes = F) +
+  geom_text(data = hdr3, aes(x = as.Date("2026-02-01"), y = 5.2, label = "outside in\n2021–2025"), hjust = 0, size = 2.4, lineheight = 0.9, color = PAL$muted, inherit.aes = F) +
+  facet_grid(rows = vars(name), switch = "y") +
+  scale_fill_manual(
+    values = PAL_KIND, breaks = c("warm", "cold", "other"),
+    labels = c("warm temperature", "cold temperature", "the other variables"),
+    name   = "Months outside the baseline envelope, carried mainly by",
+    guide  = guide_legend(title.position = "top")) +
+  scale_x_date(
+    expand = c(0, 0), limits = as.Date(c("2002-12-01", "2028-02-01")),
+    breaks = as.Date(paste0(seq(2004, 2024, 4), "-01-01")), date_labels = "%Y") +
+  scale_y_continuous(limits = c(0, 6.2), breaks = c(0, 2, 4), expand = c(0, 0)) +
+  labs(x = NULL, y = "Distance from baseline state (baseline SD)") +
+  coord_cartesian(clip = "off") +
+  theme_ms(9) +
+  theme(
+    strip.placement      = "outside",
+    strip.text.y.left    = element_text(angle = 0, hjust = 1, face = "plain", size = 8.5),
+    panel.grid.major     = element_blank(),
+    panel.spacing.y      = unit(5, "pt"),
+    axis.text.y          = element_text(size = 6),
+    axis.title.y         = element_text(size = 8),
+    legend.key.size      = unit(8, "pt"),
+    legend.title         = element_text(size = 8.5),
+    legend.text          = element_text(size = 8.5))
+save_fig(p3, "fig3_departure.png", 9, 9)
+```
+
+## Figure 4. Status, trend and drivers
+
+```{r}
+#| label: fig_scorecard
+#| fig-width: 10
+#| fig-height: 5.4
+
+VAR_LAB4 <- c(
+  sst = "Surface\ntemp.", sbt = "Seafloor\ntemp.", sss = "Salinity",
+  mld = "Mixed\nlayer", chl = "Chlorophyll", precip = "Precip.")
+d4 <- sc |>
+  select(-any_of(c("name", "region"))) |>
+  left_join(NMS, by = "nms") |>
+  left_join(crs, by = "nms") |>
+  mutate(name = fct_rev(name))
+th4 <- theme_ms(9) +
+  theme(
+    axis.text.y     = element_blank(),
+    strip.text      = element_blank(),
+    panel.grid       = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.spacing.y  = unit(8, "pt"),
+    axis.text.x.top  = element_text(size = 7.5, color = PAL$ink2, hjust = 0, lineheight = 0.9))
+
+p4a <- ggplot(d4, aes(y = name)) +
+  geom_tile(aes(x = null_q95_2021_2025 / 2, width = null_q95_2021_2025, height = 1), fill = PAL$wash) +
+  geom_segment(
+    aes(x = e_2016_2020, xend = e_2021_2025, yend = name), color = PAL$ink2, linewidth = 0.5,
+    arrow = arrow(length = unit(3.5, "pt"), type = "closed")) +
+  geom_point(aes(x = e_2016_2020), shape = 21, fill = PAL$surface, color = PAL$ink2, size = 2, stroke = 0.6) +
+  geom_point(aes(x = e_2021_2025), color = PAL$blue, size = 2.8) +
+  geom_text(aes(x = pmax(e_2016_2020, e_2021_2025) + 4, label = glue("{round(e_2021_2025)}%")), hjust = 0, size = 3, color = PAL$ink) +
+  facet_grid(rows = vars(region), scales = "free_y", space = "free_y", switch = "y") +
+  scale_x_continuous(
+    limits = c(0, 80), breaks = seq(0, 75, 25), labels = \(x) paste0(x, "%"),
+    expand = c(0, 0), position = "top") +
+  scale_y_discrete(expand = c(0, 0)) +
+  coord_cartesian(clip = "off") +
+  labs(x = "Months outside the\nbaseline envelope (open:\n2016–2020, filled: 2021–2025)", y = NULL) +
+  theme_ms(9) +
+  theme(
+    strip.placement    = "outside",
+    strip.text.y.left  = element_text(angle = 0, hjust = 1, vjust = 1, size = 7.5, color = PAL$muted, face = "plain"),
+    panel.grid.major.y = element_blank(),
+    axis.text.y        = element_text(color = PAL$ink, size = 9),
+    axis.title.x       = element_text(size = 7.5, hjust = 0, lineheight = 0.9),
+    panel.spacing.y    = unit(8, "pt"))
+
+d4b <- sv |>
+  filter(period == "2021-2025") |>
+  select(nms, var, mean_z, any_of("sig_mean")) |>
+  complete(nms = NMS$nms, var = VARS) |>
+  left_join(NMS, by = "nms") |>
+  mutate(
+    name = fct_rev(name),
+    var  = factor(var, VARS),
+    zc   = pmax(pmin(mean_z, 2.5), -2.5),
+    lab  = if_else(is.na(mean_z), "n/a", sprintf("%+.1f", mean_z)),
+    txt  = case_when(is.na(mean_z) ~ PAL$muted, abs(zc) > 1.4 ~ "white", T ~ PAL$ink))
+p4b <- ggplot(d4b, aes(var, name)) +
+  geom_tile(aes(fill = zc), color = PAL$surface, linewidth = 1.2) +
+  geom_text(aes(label = lab, color = txt, fontface = if_else(coalesce(sig_mean, F), "bold", "plain")), size = 2.9) +
+  facet_grid(rows = vars(region), scales = "free_y", space = "free_y") +
+  scale_fill_gradientn(
+    colors = PAL_DIV, limits = c(-2.5, 2.5), breaks = -2:2, na.value = "#f6f5f2",
+    name   = "Mean shift in 2021–2025 (baseline SD)") +
+  scale_color_identity() +
+  scale_x_discrete(labels = VAR_LAB4, position = "top", expand = c(0, 0), drop = F) +
+  scale_y_discrete(expand = c(0, 0)) +
+  labs(x = NULL, y = NULL) +
+  th4 +
+  theme(
+    axis.text.x.top   = element_text(size = 7, color = PAL$ink2, hjust = 0.5, lineheight = 0.9),
+    legend.position   = "bottom",
+    legend.key.height = unit(6, "pt"),
+    legend.key.width  = unit(28, "pt"),
+    legend.title      = element_text(size = 8, vjust = 1))
+
+# text columns: an invisible tile gives each row the same height as in the other panels
+txt_col <- function(d, lab, header, color = PAL$ink) {
+  ggplot(d, aes(x = 0, y = name)) +
+    geom_tile(aes(x = 0.5), fill = NA, width = 1, height = 1) +
+    geom_text(aes(label = {{ lab }}, color = {{ color }}), hjust = 0, size = 2.9) +
+    facet_grid(rows = vars(region), scales = "free_y", space = "free_y") +
+    scale_color_identity() +
+    scale_x_continuous(limits = c(0, 1), expand = c(0, 0), position = "top", breaks = 0, labels = header) +
+    scale_y_discrete(expand = c(0, 0)) +
+    coord_cartesian(clip = "off") +
+    labs(x = NULL, y = NULL) +
+    th4
+}
+d4c <- d4 |>
+  mutate(
+    form_lab = str_to_sentence(form),
+    cr_lab   = if_else(is.na(q8_status), "not rated", glue("{q8_status}, {str_to_lower(q8_trend)} ({str_replace(period, '-', '–')})")),
+    cr_col   = if_else(is.na(q8_status), PAL$muted, PAL$ink))
+p4c <- txt_col(d4c, form_lab, "Form of the\ntrajectory", PAL$ink)
+p4d <- txt_col(d4c, cr_lab, "Latest condition report:\nclimate question (period assessed)", cr_col)
+
+p4 <- p4a + p4b + p4c + p4d + plot_layout(widths = c(0.8, 1.7, 0.72, 1.2))
+save_fig(p4, "fig4_scorecard.png", 11, 5.7)
+```
+
+## Figure 5. Do documented events register?
+
+```{r}
+#| label: fig_events
+#| fig-width: 9.6
+#| fig-height: 5.9
+
+GRP_LAB <- c(
+  `TRUE`  = "Expected to register: regional, two months or longer",
+  `FALSE` = "Controls: short, local or biological")
+d5 <- evs |>
+  filter(!is.na(pct_prom)) |>
+  left_join(NMS, by = "nms") |>
+  mutate(
+    grp = factor(GRP_LAB[as.character(resolvable)], GRP_LAB),
+    lab = glue("{short}: {ev_short(event, type, as.Date(date_start), as.Date(date_end))}"),
+    dir = case_when(is.na(direction_ok) ~ "no expectation", direction_ok ~ "yes", T ~ "no")) |>
+  group_by(grp) |>
+  arrange(pct_prom, .by_group = T) |>
+  mutate(row = row_number()) |>
+  ungroup()
+t5 <- evt |>
+  mutate(
+    grp = factor(GRP_LAB[as.character(group == "resolvable")], GRP_LAB),
+    lab = glue("{round(hit_rate * n)} of {n} registered ({round(100 * hit_rate)}%); {round(100 * null_mean)}% expected by chance (p = {signif(p_value, 2)})"))
+fig5_panel <- function(g) {
+  d <- filter(d5, grp == g)
+  ggplot(d, aes(pct_prom, row)) +
+    annotate("rect", xmin = 90, xmax = 103, ymin = -Inf, ymax = Inf, fill = PAL$wash) +
+    geom_segment(aes(x = 0, xend = pct_prom, yend = row), color = PAL$grid, linewidth = 0.3) +
+    geom_point(aes(fill = registered, shape = dir), size = 2.3, stroke = 0.5, color = PAL$ink2) +
+    scale_fill_manual(values = c(`TRUE` = PAL$blue, `FALSE` = PAL$surface), guide = "none") +
+    scale_shape_manual(
+      values = c(yes = 21, no = 24, `no expectation` = 22), limits = c("yes", "no", "no expectation"),
+      name   = "Expected variables moved as expected:",
+      guide  = guide_legend(override.aes = list(fill = PAL$surface, shape = c(21, 24, 22)))) +
+    scale_x_continuous(limits = c(0, 103), breaks = c(0, 50, 90, 100), expand = c(0, 0)) +
+    coord_cartesian(clip = "off") +
+    scale_y_continuous(breaks = d$row, labels = d$lab, expand = expansion(add = 0.7)) +
+    labs(
+      x = "Prominence of the departure during the event\n(percentile among all periods of the same length)", y = NULL,
+      title = g, subtitle = filter(t5, grp == g)$lab) +
+    theme_ms(9) +
+    theme(
+      panel.grid.major   = element_blank(),
+      axis.text.y        = element_text(color = PAL$ink, size = 7.5),
+      plot.title         = element_text(size = 9.5, face = "bold"),
+      plot.subtitle      = element_text(size = 8.5),
+      axis.title.x       = element_text(size = 8),
+      legend.position    = "bottom",
+      legend.title       = element_text(size = 8),
+      legend.text        = element_text(size = 8))
+}
+p5 <- (fig5_panel(GRP_LAB[1]) + guides(shape = "none")) + fig5_panel(GRP_LAB[2]) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+save_fig(p5, "fig5_events.png", 9.6, 5.9)
+```
+
+## Figure 6. Where each sanctuary's state has moved
+
+```{r}
+#| label: fig_statespace
+#| fig-width: 8.4
+#| fig-height: 5.6
+
+per_of <- \(y) cut(y, c(2002, 2012, 2015, 2020, 2025), labels = c("base", "2013-2015", "2016-2020", "2021-2025"))
+ord6 <- c(NMS$short, "Key")
+d6 <- pca |>
+  mutate(period = per_of(year)) |>
+  group_by(nms, period) |>
+  summarize(across(c(pc1, pc2), mean), .groups = "drop") |>
+  mutate(across(c(pc1, pc2), \(x) if_else(period == "base", 0, x))) |>
+  left_join(NMS, by = "nms") |>
+  mutate(panel = factor(short, ord6)) |>
+  arrange(nms, period)
+base6 <- pca |>
+  filter(year <= 2012) |>
+  left_join(NMS, by = "nms") |>
+  mutate(panel = factor(short, ord6))
+ve   <- pcl |> filter(var == "variance_share")
+lo6  <- pcl |>
+  filter(var %in% VARS) |>
+  mutate(
+    across(c(pc1, pc2), \(x) 2.3 * x),
+    lab   = c(sst = "surface temp.", sbt = "seafloor temp.", sss = "salinity", mld = "mixing depth", chl = "chlorophyll", precip = "precip.")[var],
+    lx    = c(sst = 1.45, sbt = 1.75, sss = 0.55, mld = -0.15, chl = -0.6, precip = -0.2)[var],
+    ly    = c(sst = 1.0, sbt = -0.3, sss = -2.05, mld = -1.0, chl = 1.25, precip = 0.42)[var],
+    hj    = c(sst = 0.5, sbt = 0.5, sss = 0, mld = 1, chl = 0.5, precip = 1)[var],
+    panel = factor("Key", ord6))
+lim6 <- c(-2.3, 3.1)
+lab6 <- d6 |>
+  filter(period != "base") |>
+  mutate(yr = c("2013-2015" = "'13-15", "2016-2020" = "'16-20", "2021-2025" = "'21-25")[as.character(period)])
+p6 <- ggplot(d6, aes(pc1, pc2)) +
+  geom_hline(yintercept = 0, color = PAL$grid, linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = PAL$grid, linewidth = 0.3) +
+  geom_point(data = base6, color = "#c9c8c2", size = 0.5) +
+  geom_path(
+    aes(group = nms), color = PAL$blue, linewidth = 0.7, lineend = "round", linejoin = "round",
+    arrow = arrow(length = unit(4, "pt"), type = "closed")) +
+  geom_point(
+    data = \(d) filter(d, period %in% c("2013-2015", "2016-2020")),
+    shape = 21, fill = PAL$surface, color = PAL$blue, size = 1.3, stroke = 0.6) +
+  geom_segment(
+    data = lo6, aes(x = 0, y = 0, xend = pc1, yend = pc2), color = PAL$ink2, linewidth = 0.35,
+    arrow = arrow(length = unit(3, "pt"))) +
+  geom_text(data = lo6, aes(lx, ly, label = lab, hjust = hj), size = 2.1, color = PAL$ink2) +
+  facet_wrap(~panel, ncol = 5, drop = F) +
+  coord_equal(xlim = lim6, ylim = lim6) +
+  scale_x_continuous(breaks = c(-2, 0, 2)) +
+  scale_y_continuous(breaks = c(-2, 0, 2)) +
+  labs(
+    x = glue("Axis 1 ({round(100 * ve$pc1)}% of variance): warmer →"),
+    y = glue("Axis 2 ({round(100 * ve$pc2)}%): fresher →")) +
+  theme_ms(9) +
+  theme(panel.grid.major = element_blank(), strip.text = element_text(face = "plain", size = 8))
+save_fig(p6, "fig6_statespace.png", 8.4, 5.6)
+```
+
+## Figure 7. Climate modes and time scales
+
+```{r}
+#| label: fig_modes
+#| fig-width: 9.6
+#| fig-height: 5.2
+
+IDX_LAB <- c(oni = "ENSO\n(ONI)", pdo = "PDO", npgo = "NPGO", nao = "NAO", amo = "AMO")
+base7 <- sc |>
+  select(-any_of(c("name", "region"))) |>
+  left_join(NMS, by = "nms") |>
+  mutate(name = fct_rev(name))
+th7 <- theme_ms(9) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.spacing.y    = unit(8, "pt"),
+    strip.text         = element_blank(),
+    axis.text.y        = element_blank(),
+    axis.title.x       = element_text(size = 7.5, hjust = 0, lineheight = 0.9))
+if (!is.null(mds)) {
+  d7a <- mds |>
+    filter(index %in% names(IDX_LAB)) |>
+    select(nms, index, r2adj, p_value) |>
+    complete(nms = unique(sc$nms), index = names(IDX_LAB)) |>
+    left_join(NMS, by = "nms") |>
+    mutate(
+      name  = fct_rev(name),
+      index = factor(index, names(IDX_LAB)),
+      r2    = 100 * pmax(r2adj, 0),
+      lab   = if_else(is.na(r2), "", as.character(round(r2))),
+      txt   = if_else(coalesce(r2, 0) > 14, "white", PAL$ink))
+  p7a <- ggplot(d7a, aes(index, name)) +
+    geom_tile(aes(fill = r2), color = PAL$surface, linewidth = 1.2) +
+    geom_text(aes(label = lab, color = txt, fontface = if_else(coalesce(p_value, 1) < 0.05, "bold", "plain")), size = 2.8) +
+    facet_grid(rows = vars(region), scales = "free_y", space = "free_y", switch = "y") +
+    scale_fill_gradientn(colors = c("#f0efec", "#cde2fb", "#86b6ef", "#3987e5", "#1c5cab"), limits = c(0, NA), na.value = "#f8f8f6", guide = "none") +
+    scale_color_identity() +
+    scale_x_discrete(labels = IDX_LAB, position = "top", expand = c(0, 0), drop = F) +
+    scale_y_discrete(expand = c(0, 0)) +
+    labs(x = "Variance explained by\neach climate mode alone (%)", y = NULL) +
+    theme_ms(9) +
+    theme(
+      strip.placement   = "outside",
+      strip.text.y.left = element_text(angle = 0, hjust = 1, vjust = 1, size = 7.5, color = PAL$muted, face = "plain"),
+      panel.grid        = element_blank(),
+      panel.spacing.y   = unit(8, "pt"),
+      axis.text.y       = element_text(color = PAL$ink, size = 9),
+      axis.text.x.top   = element_text(size = 7.5, color = PAL$ink2, lineheight = 0.9),
+      axis.title.x      = element_text(size = 7.5, hjust = 0, lineheight = 0.9))
+  p7b <- ggplot(base7, aes(y = name)) +
+    geom_tile(aes(x = 40), fill = NA, width = 80, height = 1) +
+    geom_tile(aes(x = null_q95_2021_2025 / 2, width = null_q95_2021_2025, height = 1), fill = PAL$wash) +
+    geom_segment(aes(x = e_res_2021_2025, xend = e_2021_2025, yend = name), color = PAL$axis, linewidth = 0.6) +
+    geom_point(aes(x = e_2021_2025), color = PAL$blue, size = 2.6) +
+    geom_point(aes(x = e_res_2021_2025), shape = 23, fill = PAL$surface, color = PAL$ink2, size = 2, stroke = 0.6) +
+    facet_grid(rows = vars(region), scales = "free_y", space = "free_y") +
+    scale_x_continuous(limits = c(0, 80), breaks = seq(0, 75, 25), labels = \(x) paste0(x, "%"), expand = c(0, 0), position = "top") +
+    scale_y_discrete(expand = c(0, 0)) +
+    labs(x = "Months outside the envelope,\n2021–2025 (filled: observed;\nopen: climate modes removed)", y = NULL) +
+    th7
+} else {
+  p7a <- p7b <- NULL
+}
+d7c <- bnd |>
+  left_join(NMS, by = "nms") |>
+  mutate(name = fct_rev(name), band = factor(band, names(PAL_BAND)))
+p7c <- ggplot(d7c, aes(100 * r2adj, name)) +
+  geom_tile(aes(x = 0), fill = NA, width = 0, height = 1) +
+  geom_col(aes(fill = band), width = 0.62, color = PAL$surface, linewidth = 0.5, position = position_stack(reverse = T)) +
+  facet_grid(rows = vars(region), scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = PAL_BAND, name = NULL, guide = guide_legend(nrow = 2, keywidth = unit(8, "pt"), keyheight = unit(8, "pt"))) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05)), position = "top", labels = \(x) paste0(x, "%")) +
+  scale_y_discrete(expand = c(0, 0)) +
+  labs(x = "Variance with temporal\nstructure, by time scale", y = NULL) +
+  th7 + theme(legend.position = "bottom", legend.text = element_text(size = 7.5))
+p7 <- if (is.null(p7a)) p7c else p7a + p7b + p7c + plot_layout(widths = c(1.25, 1, 1.1))
+save_fig(p7, "fig7_modes.png", 9.6, 5.5)
+```
+
+## Checks
+
+```{r}
+#| label: checks
+
+figs <- list.files(dir_fig, "^fig[1-7]_.*\\.png$")
+stopifnot(length(figs) == 7, all(file.size(file.path(dir_fig, figs)) > 2e4))
+tibble(figure = figs, kb = round(file.size(file.path(dir_fig, figs)) / 1024)) |> kable()
+```
+
+## Session
+
+```{r}
+#| label: session
+
+sessionInfo()
+```
