@@ -226,7 +226,7 @@ summarize_fit <- function(fit, alphas = c(0.05, 0.02)) {
   })
 }
 
-# surrogates with no time-localised shift by construction ----
+# surrogates with no time-localized shift by construction ----
 detrend <- function(X) {
   t   <- seq_len(nrow(X))
   fit <- lm(X ~ t)
@@ -242,8 +242,8 @@ sur_ar1 <- function(X) {
   for (i in 2:(n + 50)) S[i, ] <- phi * S[i - 1, ] + Z[i, ]
   dt$trend + S[-(1:50), ]
 }
-# linear trend + phase-randomised residuals (same random phases for all variables,
-# so every auto- and cross-spectrum is preserved but nothing is localised in time)
+# linear trend + phase-randomized residuals (same random phases for all variables,
+# so every auto- and cross-spectrum is preserved but nothing is localized in time)
 sur_phase <- function(X) {
   dt  <- detrend(X); R <- dt$resid; n <- nrow(R)
   k   <- floor((n - 1) / 2)
@@ -254,7 +254,7 @@ sur_phase <- function(X) {
   dt$trend + Re(mvfft(mvfft(R) * rot, inverse = TRUE)) / n
 }
 
-# calendar-month standardised anomalies over the full common record (1998-01..2025-09):
+# calendar-month standardized anomalies over the full common record (1998-01..2025-09):
 # removes the seasonal cycle in both mean and variance without splitting the series
 get_z <- function() {
   d_wide |>
@@ -417,8 +417,8 @@ save_fig(p, "fig_control_chart_sign.png", 9, 5.6)
 ## 4. Do crossings exceed what "trend + red noise" produces?
 
 All 52 season × sanctuary analyses were re-fit, then compared with surrogate series that contain a
-linear trend plus autocorrelated noise and, by construction, **no** time-localised shift:
-`trend_ar1` (AR(1) noise with cross-correlated innovations) and `trend_phase` (phase-randomised
+linear trend plus autocorrelated noise and, by construction, **no** time-localized shift:
+`trend_ar1` (AR(1) noise with cross-correlated innovations) and `trend_phase` (phase-randomized
 residuals that preserve every auto- and cross-spectrum).
 
 ```{r}
@@ -544,14 +544,14 @@ p <- (p1 | p2) +
     title = "Series with no shift produce as many axis-crossing \"regimes\" and as much temporal structure",
     subtitle = glue(
       "Each point is one of 52 season × sanctuary analyses (alpha = {ALPHA_DECK}); grey line = 1:1;\n",
-      "surrogates = linear trend + phase-randomised residuals, {N_SUR} per analysis"),
+      "surrogates = linear trend + phase-randomized residuals, {N_SUR} per analysis"),
     theme = theme_chk())
 save_fig(p, "fig_null_regimes.png", 9, 4.8)
 ```
 
 ## 5. Do known events appear in sanctuary-mean monthly anomalies?
 
-Anomalies here are standardised by calendar month over 1998-01 to 2025-09 (chlorophyll, primary
+Anomalies here are standardized by calendar month over 1998-01 to 2025-09 (chlorophyll, primary
 production and mixed-layer depth log-transformed; precipitation square-root-transformed), so the
 seasonal cycle is removed in both mean and variance without splitting the series. Event windows are
 from the manuscript's event catalog; they are **not** used in computing anything shown.
@@ -599,7 +599,7 @@ events |>
   unnest(s) |>
   mutate(across(all_of(VARS), \(x) round(x, 1)), window = glue("{format(beg, '%Y-%m')} to {format(end, '%Y-%m')}")) |>
   select(nms, event, window, months, all_of(VARS), `best rank of 333`) |>
-  kable(caption = "Most extreme standardised anomaly (SD units) of each variable inside each event window, and the best multivariate rank (1 = most unusual month of 333)")
+  kable(caption = "Most extreme standardized anomaly (SD units) of each variable inside each event window, and the best multivariate rank (1 = most unusual month of 333)")
 ```
 
 ```{r}
@@ -634,13 +634,13 @@ p <- ggplot(d_strip, aes(x, as.numeric(var))) +
   facet_wrap(~nms, ncol = 1) +
   scale_fill_gradientn(
     colors = PAL_DIV, limits = c(-3, 3), breaks = -3:3,
-    name = "standardised anomaly (SD, capped at ±3)",
+    name = "standardized anomaly (SD, capped at ±3)",
     guide = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")) +
   scale_y_continuous(breaks = seq_along(VARS), labels = rev(VARS), limits = c(0.5, 9.4), expand = c(0, 0)) +
   scale_x_continuous(breaks = seq(1998, 2026, 2), expand = c(0, 0)) +
   labs(
     title = "Large, persistent events are unmistakable in sanctuary-mean monthly anomalies; short or local ones are not",
-    subtitle = "Calendar-month standardised anomalies, 1998-2025; boxes mark independently documented event windows",
+    subtitle = "Calendar-month standardized anomalies, 1998-2025; boxes mark independently documented event windows",
     x = NULL, y = NULL) +
   theme_chk() +
   theme(panel.grid = element_blank())
@@ -774,7 +774,7 @@ p <- ggplot(d_chr, aes(yr, nms)) +
                color = PAL$ink, linewidth = 0.9) +
   scale_fill_gradientn(
     colors = PAL_SEQ, limits = c(0, NA),
-    name = "departure of the annual state (RMS of 7 standardised annual anomalies)",
+    name = "departure of the annual state (RMS of 7 standardized annual anomalies)",
     guide = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")) +
   scale_x_continuous(breaks = seq(1998, 2025, 3), expand = c(0, 0)) +
   labs(
@@ -858,7 +858,7 @@ save_fig(p, "fig_departure.png", 9.5, 4.8)
 
 ## 7. A shared step in temperature
 
-Surface temperature is available from 1993 and does not depend on the ocean-colour record. For each
+Surface temperature is available from 1993 and does not depend on the ocean-color record. For each
 sanctuary, a single-step model of the annual anomaly (break year estimated, with a BIC penalty for
 estimating it) is compared with a linear trend.
 
@@ -955,14 +955,14 @@ z |>
   pivot_wider(names_from = era, values_from = CHL) |>
   mutate(nms = factor(nms, NMS_ORD)) |>
   arrange(nms) |>
-  kable(caption = "Mean standardised chlorophyll anomaly by ocean-colour sensor era. A step shared by sanctuaries in different basins points to the merged product, not the ocean.")
+  kable(caption = "Mean standardized chlorophyll anomaly by ocean-color sensor era. A step shared by sanctuaries in different basins points to the merged product, not the ocean.")
 
 z |>
   mutate(era = cut(yr, c(1997, 2002, 2006, 2013, 2016, 2021, 2026),
                    labels = c("1998-02", "2003-06", "2007-13", "2014-16", "2017-21", "2022-25"))) |>
   group_by(era) |>
   summarize(across(all_of(VARS), \(x) round(mean(x), 2)), .groups = "drop") |>
-  kable(caption = "Mean standardised anomaly by period, averaged over all 13 sanctuaries")
+  kable(caption = "Mean standardized anomaly by period, averaged over all 13 sanctuaries")
 
 z |>
   group_by(nms) |>
@@ -972,7 +972,7 @@ z |>
     .groups = "drop") |>
   mutate(nms = factor(nms, NMS_ORD)) |>
   arrange(nms) |>
-  kable(caption = "Redundancy among response variables (monthly standardised anomalies)")
+  kable(caption = "Redundancy among response variables (monthly standardized anomalies)")
 
 d_wide |>
   filter(date >= as_date("1998-01-01"), date <= as_date("2025-09-30")) |>
