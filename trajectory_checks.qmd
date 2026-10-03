@@ -1,0 +1,994 @@
+---
+title: "Trajectory checks: stress-testing the AEM–RDA regime workflow"
+subtitle: "Pilot diagnostics for the EcoIndicators Synthesis manuscript (13 sanctuaries × 7 EOVs)"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: true
+editor_options:
+  chunk_output_type: console
+---
+
+<!--
+PROMPT to Claude CODE 2026-10-03 (abridged):
+
+Interrogate the following notions in the EcoIndicators Synthesis paper: (1) can we illustrate the
+ordination techniques against known past events in the Sanctuaries (cold snap in Florida Keys, anoxic
+event in Flower Garden Banks, heatwave in California)? (2) is the assumption that an alternating
+dominant axis is a sign of an eco-paradigm shift a safe one? (3) can we draw reasonable conclusions from
+seasonal time binning, or is there another way to capture seasonality without predefined segmentation?
+(4) what other indicator data should we include? Any code that you write and keep for analysis should
+be committed to one of the data repos.
+-->
+
+These are **independent pilot checks**, not the manuscript's results. They re-implement the workflow
+shown in the 2026-04-20 working-group deck (monthly anomalies → z-scores → seasonal subsets →
+asymmetric eigenvector maps (AEM) → forward selection → RDA → fitted-axis "temporal control chart")
+from the same extracts ([copernicus](copernicus.html), [erddap](erddap.html)) and then ask how the
+conclusions hold up when a choice is varied or a null model is applied.
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  adespatial, dplyr, ecp, ggplot2, glue, here, knitr, lubridate, parallel,
+  patchwork, purrr, readr, scales, stringr, tibble, tidyr, vegan,
+  quiet = T)
+options(readr.show_col_types = F)
+set.seed(42)
+
+# paths ----
+copernicus_csv <- here("data/copernicus.csv")
+erddap_csv     <- here("data/erddap.csv")
+dir_chk        <- here("data/trajectory_checks")
+dir_fig        <- here("figures/trajectory_checks")
+deck_csv       <- file.path(dir_chk, "deck_2026-04-20_r2adj.csv")
+null_csv       <- file.path(dir_chk, "null_52.csv")
+full_csv       <- file.path(dir_chk, "full_series_aem.csv")
+cp_csv         <- file.path(dir_chk, "changepoints.csv")
+dir.create(dir_chk, showWarnings = F, recursive = T)
+dir.create(dir_fig, showWarnings = F, recursive = T)
+
+# constants ----
+N_SUR   <- 200                       # surrogates per analysis
+N_CORE  <- max(1, detectCores() - 2)
+VARS    <- c("tempSurf", "tempBott", "mixThick", "salinity", "precip", "CHL", "PP")
+SEASONS <- c("winter", "spring", "summer", "fall")
+# sanctuaries, ordered pacific (n -> s, then islands) to gulf and atlantic (s -> n)
+NMS_ORD <- c(
+  "OCNMS", "GFNMS", "CBNMS", "MBNMS", "CPNMS", "CINMS", "HIHWNMS", "NMSAS",
+  "FGBNMS", "FKNMS", "GRNMS", "MNMS", "SBNMS")
+VAR_LUT <- c(
+  "thetao_depth=0.49402499" = "tempSurf",
+  "bottomT"                 = "tempBott",
+  "mlotst"                  = "mixThick",
+  "so_depth=0.49402499"     = "salinity",
+  "precipitation"           = "precip",
+  "CHL"                     = "CHL",
+  "PP"                      = "PP")
+
+# plot theme: recessive chrome, thin marks ----
+PAL <- list(
+  surface = "#fcfcfb", ink = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", blue = "#2a78d6", orange = "#eb6834")
+PAL_DIV  <- c("#104281", "#2a78d6", "#9ec5f4", "#f0efec", "#f3b3ad", "#e34948", "#8f1d1c")
+PAL_SEQ  <- c("#f0efec", "#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b")
+PAL_BAND <- c("#86b6ef", "#3987e5", "#1c5cab", "#0d366b")   # ordinal, short -> long time scale
+
+theme_chk <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background    = element_rect(fill = PAL$surface, color = NA),
+      panel.background   = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major   = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = PAL$muted),
+      axis.title         = element_text(color = PAL$ink2),
+      plot.title         = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle      = element_text(color = PAL$ink2),
+      plot.caption       = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position = "plot",
+      strip.text         = element_text(color = PAL$ink, face = "bold", hjust = 0),
+      legend.position    = "top",
+      legend.justification = "left",
+      legend.title       = element_text(color = PAL$ink2),
+      legend.text        = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 200, bg = PAL$surface)
+  p
+}
+```
+
+## Data
+
+Sanctuary-wide monthly means of seven variables for thirteen sanctuaries. Where the multi-year (`my`)
+and interim (`myint`) GLORYS12 streams overlap, the multi-year value is kept.
+
+```{r}
+#| label: data
+
+d_wide <- bind_rows(read_csv(copernicus_csv), read_csv(erddap_csv)) |>
+  filter(
+    nms  %in% NMS_ORD,
+    var  %in% names(VAR_LUT),
+    stat == "mean") |>
+  mutate(
+    date   = as_date(time),
+    var    = recode(var, !!!VAR_LUT),
+    is_int = str_detect(dataset, "myint")) |>
+  arrange(nms, var, date, is_int) |>
+  distinct(nms, var, date, .keep_all = T) |>
+  select(nms, date, var, value) |>
+  pivot_wider(names_from = var, values_from = value) |>
+  arrange(nms, date)
+
+d_wide |>
+  pivot_longer(all_of(VARS), names_to = "var") |>
+  drop_na(value) |>
+  group_by(var) |>
+  summarize(
+    first = min(date), last = max(date), sanctuaries = n_distinct(nms),
+    .groups = "drop") |>
+  kable(caption = "Coverage of the seven analysis variables")
+```
+
+## Helper functions
+
+```{r}
+#| label: functions
+
+season_of <- function(mo) case_when(
+  mo %in% c(12, 1, 2) ~ "winter",
+  mo %in% 3:5         ~ "spring",
+  mo %in% 6:8         ~ "summer",
+  TRUE                ~ "fall")
+
+# monthly anomalies as in the deck: subtract the calendar-month mean over the window
+get_anom <- function(nms_i, date_beg = as_date("2002-09-01"), date_end = as_date("2025-08-31")) {
+  d_wide |>
+    filter(nms == nms_i, date >= date_beg, date <= date_end) |>
+    select(date, all_of(VARS)) |>
+    drop_na() |>
+    mutate(mo = month(date)) |>
+    group_by(mo) |>
+    mutate(across(all_of(VARS), \(x) x - mean(x))) |>
+    ungroup() |>
+    mutate(season = season_of(mo))
+}
+
+# aem basis for a regular series of n points: the first k_max eigenfunctions (the deck uses
+# aem 1-24 for the 69-point seasonal subsets) or, if k_max is NULL, all with positive moran's i
+aem_cache <- new.env()
+get_aem <- function(n, k_max = 24) {
+  key <- paste(n, k_max)
+  if (is.null(aem_cache[[key]])) {
+    a <- aem.time(n, moran = is.null(k_max))
+    E <- as.data.frame(a$aem)
+    names(E) <- paste0("AEM", seq_len(ncol(E)))
+    aem_cache[[key]] <- if (is.null(k_max)) E[, a$Moran$obs > -1 / (n - 1), drop = FALSE] else E[, seq_len(k_max), drop = FALSE]
+  }
+  aem_cache[[key]]
+}
+
+# aem -> forward selection (double stopping criterion) on z-scored responses
+fit_aem_rda <- function(Y, nperm = 999, alpha = 0.05, k_max = 24) {
+  E   <- get_aem(nrow(Y), k_max)
+  Ys  <- scale(Y)
+  r2g <- RsquareAdj(rda(Ys, E))$adj.r.squared
+  fs  <- tryCatch(
+    forward.sel(Ys, E, alpha = alpha, adjR2thresh = r2g, nperm = nperm, verbose = FALSE),
+    error = \(e) NULL)
+  list(Ys = Ys, E = E, sel = fs, n = nrow(Y))
+}
+
+# rda on the leading selected aems with p <= alpha (selection order does not depend on alpha,
+# so a stricter alpha is a prefix of the alpha = 0.05 selection)
+get_rda <- function(fit, alpha = 0.05) {
+  if (is.null(fit$sel)) return(NULL)
+  keep <- cumsum(fit$sel$pvalue > alpha) == 0
+  if (!any(keep)) return(NULL)
+  rda(fit$Ys, fit$E[, fit$sel$variables[keep], drop = FALSE])
+}
+
+# indices where two curves cross (the deck's regime boundaries)
+crossings <- function(a, b) {
+  s <- sign(a - b)
+  s <- s[s != 0]
+  which(diff(s) != 0)
+}
+
+# summary of a fit at each alpha, incl. regimes under both sign conventions for axis ii
+summarize_fit <- function(fit, alphas = c(0.05, 0.02)) {
+  map_dfr(alphas, \(al) {
+    m <- get_rda(fit, al)
+    if (is.null(m))
+      return(tibble(alpha = al, r2a = 0, n_aem = 0L, aems = "", n_reg = 1L, n_reg_flip = 1L, cross = "", cross_flip = ""))
+    k    <- sum(cumsum(fit$sel$pvalue > al) == 0)
+    aems <- paste(fit$sel$order[seq_len(k)], collapse = ",")
+    r2a  <- RsquareAdj(m)$adj.r.squared
+    if (length(eigenvals(m, model = "constrained")) < 2)
+      return(tibble(alpha = al, r2a = r2a, n_aem = k, aems = aems, n_reg = 1L, n_reg_flip = 1L, cross = "", cross_flip = ""))
+    lc <- scores(m, display = "lc", choices = 1:2, scaling = 1)
+    i1 <- crossings(lc[, 1],  lc[, 2])
+    i2 <- crossings(lc[, 1], -lc[, 2])
+    tibble(
+      alpha = al, r2a = r2a, n_aem = k, aems = aems,
+      n_reg = length(i1) + 1L, n_reg_flip = length(i2) + 1L,
+      cross = paste(i1 + 1, collapse = ","), cross_flip = paste(i2 + 1, collapse = ","))
+  })
+}
+
+# surrogates with no time-localised shift by construction ----
+detrend <- function(X) {
+  t   <- seq_len(nrow(X))
+  fit <- lm(X ~ t)
+  list(trend = fitted(fit), resid = residuals(fit))
+}
+# linear trend + ar(1) noise with cross-correlated innovations
+sur_ar1 <- function(X) {
+  dt  <- detrend(X); R <- dt$resid; n <- nrow(R); p <- ncol(R)
+  phi <- apply(R, 2, \(x) acf(x, lag.max = 1, plot = FALSE)$acf[2])
+  inn <- R[-1, ] - sweep(R[-n, ], 2, phi, `*`)
+  Z   <- matrix(rnorm((n + 50) * p), ncol = p) %*% chol(cov(inn))
+  S   <- matrix(0, n + 50, p)
+  for (i in 2:(n + 50)) S[i, ] <- phi * S[i - 1, ] + Z[i, ]
+  dt$trend + S[-(1:50), ]
+}
+# linear trend + phase-randomised residuals (same random phases for all variables,
+# so every auto- and cross-spectrum is preserved but nothing is localised in time)
+sur_phase <- function(X) {
+  dt  <- detrend(X); R <- dt$resid; n <- nrow(R)
+  k   <- floor((n - 1) / 2)
+  ph  <- runif(k, 0, 2 * pi)
+  rot <- rep(1 + 0i, n)
+  rot[2:(k + 1)]     <- exp(1i * ph)
+  rot[n:(n - k + 1)] <- exp(-1i * ph)
+  dt$trend + Re(mvfft(mvfft(R) * rot, inverse = TRUE)) / n
+}
+
+# calendar-month standardised anomalies over the full common record (1998-01..2025-09):
+# removes the seasonal cycle in both mean and variance without splitting the series
+get_z <- function() {
+  d_wide |>
+    filter(date >= as_date("1998-01-01"), date <= as_date("2025-09-30")) |>
+    select(nms, date, all_of(VARS)) |>
+    drop_na() |>
+    mutate(
+      mo = month(date),
+      yr = year(date),
+      across(c(CHL, PP, mixThick), log),
+      precip = sqrt(precip)) |>
+    group_by(nms, mo) |>
+    mutate(across(all_of(VARS), \(x) {
+      s <- sd(x)
+      if (s < 1e-8) rep(0, length(x)) else (x - mean(x)) / s })) |>
+    ungroup()
+}
+z <- get_z()
+```
+
+## 1. What the AEM basis is
+
+For a regular series, AEM *k* crosses zero *k* times: it completes one full oscillation in 2*L*/*k*
+years, where *L* is the record length. The deck labels AEM *k* as *L*/*k* years, which is the length
+of one monotonic excursion (half a cycle). AEM 1 is therefore a monotonic curve that is almost
+indistinguishable from a straight line, and AEM 2 completes exactly one oscillation in the record.
+The eigenvalues fall as 1/*k*², which is the spectrum of a random walk.
+
+```{r}
+#| label: aem_basis
+
+n_s  <- 69                                   # jun-aug 2003-2025
+L_yr <- 22.2
+a69  <- aem.time(n_s, moran = FALSE)
+tibble(
+  AEM                 = 1:8,
+  `zero crossings`    = apply(a69$aem[, 1:8], 2, \(v) sum(diff(sign(v)) != 0)),
+  `deck label (yr)`   = round(L_yr / (1:8), 1),
+  `full cycle (yr)`   = round(2 * L_yr / (1:8), 1),
+  `eigenvalue / first` = round(a69$values[1:8] / a69$values[1], 3),
+  `1 / k^2`           = round(1 / (1:8)^2, 3)) |>
+  kable(caption = glue(
+    "AEM basis for n = {n_s}. Correlation of AEM 1 with time = ",
+    "{round(abs(cor(a69$aem[, 1], seq_len(n_s))), 3)}."))
+```
+
+```{r}
+#| label: fig_aem_basis
+#| fig-width: 9
+#| fig-height: 3.2
+
+d_aem <- as_tibble(a69$aem[, 1:4]) |>
+  setNames(glue("AEM {1:4}\ndeck label {round(L_yr / 1:4, 1)} yr; full cycle {round(2 * L_yr / 1:4, 1)} yr")) |>
+  mutate(year = 2003 + (row_number() - 1) / 3) |>
+  pivot_longer(-year, names_to = "aem")
+
+p <- ggplot(d_aem, aes(year, value)) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_line(color = PAL$blue, linewidth = 0.7) +
+  facet_wrap(~aem, nrow = 1) +
+  labs(
+    title = "AEM 1 is a trend, not a cycle",
+    subtitle = "First four temporal eigenfunctions for a 69-point (22.2 yr) seasonal subset",
+    x = NULL, y = "eigenfunction value") +
+  theme_chk()
+save_fig(p, "fig_aem_basis.png", 9, 3.2)
+```
+
+## 2. Replication of the flagship analysis (HIHWNMS, summer)
+
+Candidates are AEM 1–24 as in the deck. Forward selection at α = 0.05 retains slightly more
+eigenfunctions than the deck; α = 0.02 reproduces the deck's 52 models most closely (section 4), so
+both are carried through.
+
+```{r}
+#| label: replicate
+
+ALPHA_DECK <- 0.02      # reproduces the deck's models most closely
+
+a_hi   <- get_anom("HIHWNMS") |> filter(season == "summer")
+fit_hi <- fit_aem_rda(as.matrix(a_hi[, VARS]))
+m_hi   <- get_rda(fit_hi, ALPHA_DECK)
+
+deck_hi <- tibble(
+  variables  = paste0("AEM", c(1, 3, 2, 14, 4, 8, 16, 5)),
+  deck_R2adj = c(0.1527, 0.1399, 0.0554, 0.0309, 0.0299, 0.0169, 0.0154, 0.0118))
+
+fit_hi$sel |>
+  as_tibble() |>
+  mutate(this_R2adj = c(AdjR2Cum[1], diff(AdjR2Cum))) |>
+  select(variables, this_R2adj, pvalue) |>
+  full_join(deck_hi, by = "variables") |>
+  mutate(across(where(is.numeric), \(x) round(x, 4))) |>
+  kable(caption = glue(
+    "Forward-selected AEMs (alpha = 0.05), this notebook vs. the deck (slide 12). n = {nrow(a_hi)}. ",
+    "Total adjusted R2: {round(RsquareAdj(get_rda(fit_hi, 0.05))$adj.r.squared, 3)} at alpha 0.05, ",
+    "{round(RsquareAdj(m_hi)$adj.r.squared, 3)} at alpha {ALPHA_DECK}; deck 0.453. ",
+    "Differences reflect the refreshed extract and unspecified pre-processing details."))
+```
+
+## 3. Are axis-crossing regimes invariant?
+
+The control chart draws the fitted site scores of canonical axes I and II through time and places a
+regime boundary wherever the two curves cross. Eigenvectors have no intrinsic sign: reflecting an
+axis gives an equally valid ordination. If boundaries move when an axis is reflected, they describe a
+plotting convention rather than the system.
+
+```{r}
+#| label: crossing_conventions
+
+get_regimes <- function(m, dates, scaling = 1, flip2 = 1) {
+  lc <- scores(m, display = "lc", choices = 1:2, scaling = scaling)
+  i  <- crossings(lc[, 1], flip2 * lc[, 2])
+  tibble(
+    scaling    = scaling,
+    `axis II`  = if_else(flip2 == 1, "as returned", "reflected"),
+    regimes    = length(i) + 1,
+    boundaries = paste(format(dates[i + 1], "%Y-%m"), collapse = ", "))
+}
+expand_grid(alpha = c(ALPHA_DECK, 0.05), scaling = c(1, 2), flip2 = c(1, -1)) |>
+  pmap_dfr(\(alpha, scaling, flip2)
+    get_regimes(get_rda(fit_hi, alpha), a_hi$date, scaling, flip2) |> mutate(alpha = alpha, .before = 1)) |>
+  kable(caption = "HIHWNMS summer: regime boundaries under equivalent presentations of the same RDA. The deck reports boundaries at Jul 2009, Jul 2010 and Jul 2018.")
+```
+
+```{r}
+#| label: fig_control_chart_sign
+#| fig-width: 9
+#| fig-height: 5.6
+
+lc <- scores(m_hi, display = "lc", choices = 1:2, scaling = 1)
+conv_lab <- c(
+  a = "Convention A: axis II as returned by the software",
+  b = "Convention B: axis II reflected (an equally valid solution)")
+d_cc <- bind_rows(
+  tibble(conv = conv_lab["a"], date = a_hi$date, `Axis I` = lc[, 1], `Axis II` =  lc[, 2]),
+  tibble(conv = conv_lab["b"], date = a_hi$date, `Axis I` = lc[, 1], `Axis II` = -lc[, 2])) |>
+  pivot_longer(c(`Axis I`, `Axis II`), names_to = "axis", values_to = "score")
+d_bd <- bind_rows(
+  tibble(conv = conv_lab["a"], date = a_hi$date[crossings(lc[, 1],  lc[, 2]) + 1]),
+  tibble(conv = conv_lab["b"], date = a_hi$date[crossings(lc[, 1], -lc[, 2]) + 1])) |>
+  mutate(lab = format(date, "%Y"))
+y_top <- max(abs(d_cc$score)) * 1.25
+
+p <- ggplot(d_cc, aes(date, score)) +
+  geom_vline(data = d_bd, aes(xintercept = date), color = PAL$ink2, linewidth = 0.3) +
+  geom_text(data = d_bd, aes(x = date, y = y_top, label = lab),
+            color = PAL$ink2, size = 2.8, hjust = -0.15, check_overlap = TRUE) +
+  geom_line(aes(color = axis), linewidth = 0.7) +
+  facet_wrap(~conv, ncol = 1) +
+  scale_color_manual(values = c("Axis I" = PAL$blue, "Axis II" = PAL$orange), name = NULL) +
+  labs(
+    title = "Regime boundaries move when an axis is reflected",
+    subtitle = "HIHWNMS summer anomalies: fitted site scores of canonical axes I and II; vertical lines mark crossings",
+    x = NULL, y = "fitted site score (scaling 1)") +
+  theme_chk()
+save_fig(p, "fig_control_chart_sign.png", 9, 5.6)
+```
+
+## 4. Do crossings exceed what "trend + red noise" produces?
+
+All 52 season × sanctuary analyses were re-fit, then compared with surrogate series that contain a
+linear trend plus autocorrelated noise and, by construction, **no** time-localised shift:
+`trend_ar1` (AR(1) noise with cross-correlated innovations) and `trend_phase` (phase-randomised
+residuals that preserve every auto- and cross-spectrum).
+
+```{r}
+#| label: null_52
+
+if (!file.exists(null_csv)) {
+  jobs <- expand_grid(nms = NMS_ORD, season = SEASONS)
+  run_job <- function(j) {
+    set.seed(1000 + j)
+    a   <- get_anom(jobs$nms[j])
+    X   <- as.matrix(a[, VARS])
+    idx <- which(a$season == jobs$season[j])
+    to_dates <- \(s) map_chr(s, \(x) if (x == "") "" else
+      paste(format(a$date[idx][as.integer(str_split(x, ",")[[1]])], "%Y-%m"), collapse = ","))
+    fit <- \(M, nperm) summarize_fit(fit_aem_rda(M[idx, ], nperm = nperm))
+    bind_rows(
+      fit(X, 999) |> mutate(type = "observed", rep = 0L),
+      map_dfr(seq_len(N_SUR), \(r) fit(sur_ar1(X),   199) |> mutate(type = "trend_ar1",   rep = r)),
+      map_dfr(seq_len(N_SUR), \(r) fit(sur_phase(X), 199) |> mutate(type = "trend_phase", rep = r))) |>
+      mutate(
+        nms = jobs$nms[j], season = jobs$season[j], n = length(idx),
+        cross_dates      = if_else(type == "observed", to_dates(cross), ""),
+        cross_dates_flip = if_else(type == "observed", to_dates(cross_flip), ""))
+  }
+  invisible(get_aem(69))
+  mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORE) |>
+    bind_rows() |>
+    select(nms, season, n, type, rep, alpha, r2a, n_aem, aems, n_reg, n_reg_flip, cross_dates, cross_dates_flip) |>
+    write_csv(null_csv)
+}
+d_null <- read_csv(null_csv, col_types = cols(
+  aems = "c", cross_dates = "c", cross_dates_flip = "c")) |>
+  mutate(across(c(aems, cross_dates, cross_dates_flip), \(x) replace_na(x, "")))
+d_obs  <- d_null |> filter(type == "observed")
+d_deck <- read_csv(deck_csv)
+
+# replication fidelity across all 52 analyses, by alpha
+d_obs |>
+  left_join(d_deck |> rename(n_aem_deck = n_aem), by = c("nms", "season")) |>
+  group_by(alpha) |>
+  summarize(
+    `r (adj. R2, here vs deck)`         = round(cor(r2a, r2adj_pct), 2),
+    `median adj. R2 here (%)`           = round(100 * median(r2a), 1),
+    `median adj. R2 deck (%)`           = median(r2adj_pct),
+    `median abs. difference (points)`   = round(median(abs(100 * r2a - r2adj_pct)), 1),
+    `median AEMs here`                  = median(n_aem),
+    `median AEMs deck`                  = median(n_aem_deck),
+    .groups = "drop") |>
+  kable(caption = "How closely this notebook reproduces the deck's 52 models (slide 33)")
+```
+
+```{r}
+#| label: null_summary
+
+has_aem1 <- \(x) str_detect(paste0(",", x, ","), ",1,")
+d_sum <- d_null |>
+  filter(type != "observed") |>
+  group_by(alpha, nms, season, type) |>
+  summarize(
+    reg_med = median(n_reg), reg_lo = quantile(n_reg, 0.05), reg_hi = quantile(n_reg, 0.95),
+    r2a_med = median(r2a),   r2a_lo = quantile(r2a, 0.05),   r2a_hi = quantile(r2a, 0.95),
+    aem1    = mean(has_aem1(aems)),
+    .groups = "drop") |>
+  left_join(
+    d_obs |> select(alpha, nms, season, reg_obs = n_reg, reg_obs_flip = n_reg_flip, r2a_obs = r2a, aems_obs = aems),
+    by = c("alpha", "nms", "season"))
+
+d_sum |>
+  group_by(alpha, type) |>
+  summarize(
+    `observed regimes per analysis, median (range)` = glue("{median(reg_obs)} ({min(reg_obs)}-{max(reg_obs)})"),
+    `surrogate regimes per analysis, median`        = median(reg_med),
+    `observed regime count inside surrogate 5-95%`  = glue("{sum(reg_obs >= reg_lo & reg_obs <= reg_hi)} of {n()}"),
+    `observed regime count above surrogate 95%`     = glue("{sum(reg_obs > reg_hi)} of {n()}"),
+    `observed adj. R2 above surrogate 95%`          = glue("{sum(r2a_obs > r2a_hi)} of {n()}"),
+    `observed analyses selecting AEM 1`             = glue("{sum(has_aem1(aems_obs))} of {n()}"),
+    `surrogates selecting AEM 1 (%)`                = round(100 * mean(aem1)),
+    .groups = "drop") |>
+  kable(caption = glue("Observed analyses vs. no-shift surrogates ({N_SUR} per analysis)"))
+
+d_obs |>
+  group_by(alpha) |>
+  summarize(
+    `regimes, axis II as returned` = glue("{sum(n_reg)} in total; median {median(n_reg)}"),
+    `regimes, axis II reflected`   = glue("{sum(n_reg_flip)} in total; median {median(n_reg_flip)}"),
+    `analyses with identical boundaries under both conventions` = glue("{sum(cross_dates == cross_dates_flip)} of {n()}"),
+    .groups = "drop") |>
+  kable(caption = "Sensitivity of crossing-defined regimes to the sign of axis II, all 52 analyses")
+```
+
+```{r}
+#| label: fig_null_regimes
+#| fig-width: 9
+#| fig-height: 4.8
+
+d_plot <- d_sum |> filter(type == "trend_phase", alpha == ALPHA_DECK)
+lim_r  <- c(0, max(d_plot$reg_hi, d_plot$reg_obs) + 1)
+p1 <- ggplot(d_plot, aes(reg_obs, reg_med)) +
+  geom_abline(slope = 1, intercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_linerange(aes(ymin = reg_lo, ymax = reg_hi), color = PAL$axis, linewidth = 0.4,
+                 position = position_jitter(width = 0.2, height = 0, seed = 1)) +
+  geom_point(color = PAL$blue, size = 1.8,
+             position = position_jitter(width = 0.2, height = 0, seed = 1)) +
+  coord_equal(xlim = lim_r, ylim = lim_r) +
+  labs(
+    title = "Number of crossing-defined regimes",
+    x = "observed data", y = "no-shift surrogates (median, 5-95%)") +
+  theme_chk()
+lim_a <- c(0, max(d_plot$r2a_hi, d_plot$r2a_obs) + 0.05)
+p2 <- ggplot(d_plot, aes(r2a_obs, r2a_med)) +
+  geom_abline(slope = 1, intercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_linerange(aes(ymin = r2a_lo, ymax = r2a_hi), color = PAL$axis, linewidth = 0.4) +
+  geom_point(color = PAL$blue, size = 1.8) +
+  scale_x_continuous(labels = label_percent()) +
+  scale_y_continuous(labels = label_percent()) +
+  coord_equal(xlim = lim_a, ylim = lim_a) +
+  labs(
+    title = "Adjusted R² of the AEM model",
+    x = "observed data", y = "no-shift surrogates (median, 5-95%)") +
+  theme_chk()
+p <- (p1 | p2) +
+  plot_annotation(
+    title = "Series with no shift produce as many axis-crossing \"regimes\" and as much temporal structure",
+    subtitle = glue(
+      "Each point is one of 52 season × sanctuary analyses (alpha = {ALPHA_DECK}); grey line = 1:1;\n",
+      "surrogates = linear trend + phase-randomised residuals, {N_SUR} per analysis"),
+    theme = theme_chk())
+save_fig(p, "fig_null_regimes.png", 9, 4.8)
+```
+
+## 5. Do known events appear in sanctuary-mean monthly anomalies?
+
+Anomalies here are standardised by calendar month over 1998-01 to 2025-09 (chlorophyll, primary
+production and mixed-layer depth log-transformed; precipitation square-root-transformed), so the
+seasonal cycle is removed in both mean and variance without splitting the series. Event windows are
+from the manuscript's event catalog; they are **not** used in computing anything shown.
+
+```{r}
+#| label: events
+
+# lab_row staggers labels of events that are close in time
+events <- tribble(
+  ~nms,      ~event,                                   ~beg,         ~end,         ~lab_row,
+  "CINMS",   "1997-98 El Niño",                        "1998-01-01", "1998-06-30", 1,
+  "CINMS",   "2014-16 marine heatwave",                "2014-01-01", "2016-08-31", 1,
+  "HIHWNMS", "2015 heatwave",                          "2015-07-01", "2015-11-30", 1,
+  "HIHWNMS", "2019 heatwave",                          "2019-06-01", "2019-12-31", 1,
+  "FKNMS",   "2010 cold winter (Jan cold snap)",       "2010-01-01", "2010-03-31", 1,
+  "FKNMS",   "2023 heatwave",                          "2023-06-01", "2023-09-30", 1,
+  "FGBNMS",  "Hurricane Ike (Sep 2008)",               "2008-09-01", "2008-10-31", 2,
+  "FGBNMS",  "2010 cold winter",                       "2010-01-01", "2010-04-30", 1,
+  "FGBNMS",  "Jul 2016 mortality event (hypoxia)",     "2016-07-01", "2016-07-31", 2,
+  "FGBNMS",  "Hurricane Harvey (Sep 2017)",            "2017-09-01", "2017-10-31", 1,
+  "GRNMS",   "2003 summer cold event",                 "2003-07-01", "2003-08-31", 1,
+  "GRNMS",   "2010 cold winter",                       "2010-01-01", "2010-03-31", 1,
+  "SBNMS",   "2012 heatwave",                          "2012-01-01", "2012-12-31", 1) |>
+  mutate(across(c(beg, end), as_date))
+
+sigma_from_d2 <- function(d2, p) qnorm(pchisq(d2, df = p) / 2 + 0.5)
+z <- z |>
+  group_by(nms) |>
+  group_modify(\(d, k) {
+    X  <- as.matrix(d[, VARS])
+    d2 <- mahalanobis(X, colMeans(X), cov(X))
+    d |> mutate(sigma = sigma_from_d2(d2, length(VARS)), rank_mv = rank(-d2))
+  }) |>
+  ungroup()
+
+events |>
+  rowwise() |>
+  mutate(s = list(
+    z |>
+      filter(nms == .env$nms, date >= beg, date <= end) |>
+      summarize(
+        months            = n(),
+        across(all_of(VARS), \(x) x[which.max(abs(x))]),
+        `best rank of 333` = min(rank_mv)))) |>
+  unnest(s) |>
+  mutate(across(all_of(VARS), \(x) round(x, 1)), window = glue("{format(beg, '%Y-%m')} to {format(end, '%Y-%m')}")) |>
+  select(nms, event, window, months, all_of(VARS), `best rank of 333`) |>
+  kable(caption = "Most extreme standardised anomaly (SD units) of each variable inside each event window, and the best multivariate rank (1 = most unusual month of 333)")
+```
+
+```{r}
+#| label: fig_event_strips
+#| fig-width: 10
+#| fig-height: 10
+
+nms_ev <- c("CINMS", "HIHWNMS", "FKNMS", "FGBNMS", "GRNMS", "SBNMS")
+d_strip <- z |>
+  filter(nms %in% nms_ev) |>
+  select(nms, date, all_of(VARS)) |>
+  pivot_longer(all_of(VARS), names_to = "var", values_to = "z") |>
+  mutate(
+    nms = factor(nms, nms_ev),
+    var = factor(var, rev(VARS)),
+    x   = year(date) + (month(date) - 0.5) / 12,
+    z   = pmax(pmin(z, 3), -3))
+d_ev <- events |>
+  mutate(
+    nms  = factor(nms, nms_ev),
+    xmin = year(beg) + (month(beg) - 1) / 12,
+    xmax = year(end) + month(end) / 12)
+
+p <- ggplot(d_strip, aes(x, as.numeric(var))) +
+  geom_raster(aes(fill = z)) +
+  geom_rect(data = d_ev, inherit.aes = FALSE,
+            aes(xmin = xmin, xmax = xmax, ymin = 0.5, ymax = 7.5),
+            fill = NA, color = PAL$ink, linewidth = 0.35) +
+  geom_text(data = d_ev, inherit.aes = FALSE,
+            aes(x = xmin, y = 7.35 + 0.8 * lab_row, label = event),
+            hjust = 0, size = 2.7, color = PAL$ink2) +
+  facet_wrap(~nms, ncol = 1) +
+  scale_fill_gradientn(
+    colors = PAL_DIV, limits = c(-3, 3), breaks = -3:3,
+    name = "standardised anomaly (SD, capped at ±3)",
+    guide = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")) +
+  scale_y_continuous(breaks = seq_along(VARS), labels = rev(VARS), limits = c(0.5, 9.4), expand = c(0, 0)) +
+  scale_x_continuous(breaks = seq(1998, 2026, 2), expand = c(0, 0)) +
+  labs(
+    title = "Large, persistent events are unmistakable in sanctuary-mean monthly anomalies; short or local ones are not",
+    subtitle = "Calendar-month standardised anomalies, 1998-2025; boxes mark independently documented event windows",
+    x = NULL, y = NULL) +
+  theme_chk() +
+  theme(panel.grid = element_blank())
+save_fig(p, "fig_event_strips.png", 10, 10)
+```
+
+## 6. One analysis per sanctuary instead of four
+
+Running the same AEM–RDA on the full monthly series (n = 333) resolves sub-annual to multi-decadal
+structure in one model per sanctuary. Selected eigenfunctions are grouped into four time-scale bands
+by their full-cycle period (2*L*/*k*).
+
+```{r}
+#| label: full_series
+
+if (!file.exists(full_csv)) {
+  fit_full <- function(nms_i) {
+    d   <- z |> filter(nms == nms_i) |> arrange(date)
+    Y   <- as.matrix(d[, VARS])
+    E   <- get_aem(nrow(Y), k_max = NULL)
+    r2g <- RsquareAdj(rda(Y, E))$adj.r.squared
+    fs  <- forward.sel(Y, E, alpha = 0.05, adjR2thresh = r2g, nperm = 499, verbose = FALSE)
+    tibble(nms = nms_i, n = nrow(Y), k = fs$order, r2a_inc = c(fs$AdjR2Cum[1], diff(fs$AdjR2Cum)))
+  }
+  invisible(get_aem(333, k_max = NULL))
+  mclapply(NMS_ORD, fit_full, mc.cores = N_CORE) |>
+    bind_rows() |>
+    write_csv(full_csv)
+}
+BANDS <- c("< 1.5 yr", "1.5-8 yr (interannual)", "8-15 yr (decadal)", "> 15 yr (trend-like)")
+d_full <- read_csv(full_csv) |>
+  mutate(
+    period_yr = 2 * (n / 12) / k,
+    band      = cut(period_yr, c(0, 1.5, 8, 15, Inf), labels = BANDS),
+    nms       = factor(nms, rev(NMS_ORD)))
+d_band <- d_full |>
+  group_by(nms, band) |>
+  summarize(r2a = sum(r2a_inc), .groups = "drop")
+d_tot <- d_full |>
+  group_by(nms) |>
+  summarize(r2a = sum(r2a_inc), n_aem = n(), .groups = "drop")
+
+d_band |>
+  mutate(r2a = round(100 * r2a, 1)) |>
+  pivot_wider(names_from = band, values_from = r2a, values_fill = 0, names_sort = T) |>
+  left_join(d_tot |> mutate(`total adj. R2 (%)` = round(100 * r2a, 1)) |> select(nms, `total adj. R2 (%)`, `AEMs selected` = n_aem), by = "nms") |>
+  arrange(desc(nms)) |>
+  kable(caption = "Full-series AEM–RDA (n = 333 months per sanctuary): adjusted R² (%) by time-scale band")
+```
+
+```{r}
+#| label: fig_timescale_bands
+#| fig-width: 9
+#| fig-height: 4.8
+
+p <- ggplot(d_band, aes(r2a, nms)) +
+  geom_col(aes(fill = band), width = 0.62, color = PAL$surface, linewidth = 0.6,
+           position = position_stack(reverse = TRUE)) +
+  geom_text(data = d_tot, aes(x = r2a, label = percent(r2a, accuracy = 1)),
+            hjust = -0.25, size = 3, color = PAL$ink2) +
+  scale_fill_manual(values = setNames(PAL_BAND, BANDS), name = "time-scale band (full-cycle period)") +
+  scale_x_continuous(labels = label_percent(), expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title = "Time-scale fingerprint of each sanctuary from one full-series model",
+    subtitle = "Adjusted R² of the 7-variable anomaly state explained by temporal eigenfunctions, 1998-2025 (n = 333 months)",
+    x = "adjusted R²", y = NULL) +
+  theme_chk() +
+  theme(panel.grid.major.y = element_blank())
+save_fig(p, "fig_timescale_bands.png", 9, 4.8)
+```
+
+### Distribution-free change points and a chronology prototype
+
+E-divisive (`ecp::e.divisive`) finds multivariate change points without reference to ordination
+axes. Annual means are used for the chronology because monthly anomalies are autocorrelated, which
+inflates detections.
+
+```{r}
+#| label: changepoints
+
+if (!file.exists(cp_csv)) {
+  cp_monthly <- function(nms_i) {
+    d  <- z |> filter(nms == nms_i) |> arrange(date)
+    i  <- e.divisive(as.matrix(d[, VARS]), sig.lvl = 0.01, R = 499, min.size = 36)$estimates
+    i  <- i[i > 1 & i <= nrow(d)]
+    tibble(nms = nms_i, cp_monthly = paste(format(d$date[i], "%Y-%m"), collapse = ", "))
+  }
+  cp_annual <- function(nms_i) {
+    d  <- z |> filter(nms == nms_i, yr <= 2024) |>
+      group_by(yr) |> summarize(across(all_of(VARS), mean), .groups = "drop")
+    i  <- e.divisive(as.matrix(d[, VARS]), sig.lvl = 0.05, R = 999, min.size = 4)$estimates
+    i  <- i[i > 1 & i <= nrow(d)]
+    tibble(nms = nms_i, cp_annual = paste(d$yr[i], collapse = ", "))
+  }
+  left_join(
+    mclapply(NMS_ORD, cp_monthly, mc.cores = N_CORE) |> bind_rows(),
+    mclapply(NMS_ORD, cp_annual,  mc.cores = N_CORE) |> bind_rows(), by = "nms") |>
+    write_csv(cp_csv)
+}
+d_cp <- read_csv(cp_csv, col_types = "ccc")
+d_cp |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "E-divisive change points: monthly anomalies (min. segment 36 months, alpha 0.01) and annual means (min. 4 years, alpha 0.05; value = first year of the new segment)")
+```
+
+```{r}
+#| label: fig_chronology
+#| fig-width: 9.5
+#| fig-height: 4.8
+
+ann <- z |>
+  group_by(nms, yr) |>
+  summarize(across(all_of(VARS), mean), .groups = "drop") |>
+  group_by(nms) |>
+  mutate(across(all_of(VARS), \(x) x / sd(x))) |>
+  ungroup()
+d_chr <- ann |>
+  mutate(
+    rms = sqrt(rowMeans(across(all_of(VARS), \(x) x^2))),
+    nms = factor(nms, rev(NMS_ORD)))
+d_cpa <- d_cp |>
+  separate_longer_delim(cp_annual, ", ") |>
+  filter(!is.na(cp_annual), cp_annual != "") |>
+  mutate(yr = as.numeric(cp_annual), nms = factor(nms, rev(NMS_ORD)))
+
+p <- ggplot(d_chr, aes(yr, nms)) +
+  geom_tile(aes(fill = rms), color = PAL$surface, linewidth = 0.6) +
+  geom_segment(data = d_cpa, inherit.aes = FALSE,
+               aes(x = yr - 0.5, xend = yr - 0.5, y = as.numeric(nms) - 0.48, yend = as.numeric(nms) + 0.48),
+               color = PAL$ink, linewidth = 0.9) +
+  scale_fill_gradientn(
+    colors = PAL_SEQ, limits = c(0, NA),
+    name = "departure of the annual state (RMS of 7 standardised annual anomalies)",
+    guide = guide_colorbar(barwidth = 14, barheight = 0.5, title.position = "top")) +
+  scale_x_continuous(breaks = seq(1998, 2025, 3), expand = c(0, 0)) +
+  labs(
+    title = "Chronology prototype: when each sanctuary's environmental state departed, and where it changed",
+    subtitle = "Tiles = size of the annual multivariate anomaly; black bars = e-divisive change points on annual means",
+    x = NULL, y = NULL) +
+  theme_chk() +
+  theme(panel.grid = element_blank())
+save_fig(p, "fig_chronology.png", 9.5, 4.8)
+```
+
+### How far has each sanctuary moved from its own baseline?
+
+Shift of the most recent decade (2016-2025) from a baseline decade, per variable, in units of the
+baseline's interannual standard deviation. Units are dimensionless, so sanctuaries can be compared.
+
+```{r}
+#| label: departure
+
+get_departure <- function(yr_base) {
+  z |>
+    group_by(nms, yr) |>
+    summarize(across(all_of(VARS), mean), .groups = "drop") |>
+    group_by(nms) |>
+    group_modify(\(d, k) {
+      B  <- as.matrix(d[d$yr %in% yr_base, VARS])
+      R  <- as.matrix(d[d$yr >= 2016, VARS])
+      sh <- (colMeans(R) - colMeans(B)) / apply(B, 2, sd)
+      as_tibble(as.list(sh)) |> mutate(rms = sqrt(mean(sh^2)))
+    }) |>
+    ungroup() |>
+    mutate(baseline = glue("{min(yr_base)}-{max(yr_base)}"))
+}
+d_dep <- bind_rows(get_departure(1998:2007), get_departure(2003:2012))
+
+d_dep |>
+  mutate(across(where(is.numeric), \(x) round(x, 1))) |>
+  arrange(baseline, desc(rms)) |>
+  select(baseline, nms, all_of(VARS), `RMS shift` = rms) |>
+  kable(caption = "Shift of the 2016-2025 mean from two alternative baseline decades (baseline interannual SD units)")
+```
+
+```{r}
+#| label: fig_departure
+#| fig-width: 9.5
+#| fig-height: 4.8
+
+d1    <- d_dep |> filter(baseline == "2003-2012")
+ord   <- d1 |> arrange(rms) |> pull(nms)
+d_var <- d1 |>
+  pivot_longer(all_of(VARS), names_to = "var", values_to = "shift") |>
+  mutate(nms = factor(nms, ord), var = factor(var, VARS))
+
+p1 <- ggplot(d_var, aes(var, nms)) +
+  geom_tile(aes(fill = pmax(pmin(shift, 4), -4)), color = PAL$surface, linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%+.1f", shift),
+                color = abs(shift) > 2.4), size = 2.9, show.legend = FALSE) +
+  scale_color_manual(values = c(`TRUE` = "white", `FALSE` = PAL$ink)) +
+  scale_fill_gradientn(
+    colors = PAL_DIV, limits = c(-4, 4), name = "shift (baseline SD)",
+    guide = guide_colorbar(barwidth = 9, barheight = 0.5, title.position = "top")) +
+  scale_x_discrete(position = "top") +
+  labs(x = NULL, y = NULL) +
+  theme_chk() +
+  theme(panel.grid = element_blank())
+p2 <- ggplot(d1 |> mutate(nms = factor(nms, ord)), aes(rms, nms)) +
+  geom_col(fill = PAL$blue, width = 0.5) +
+  geom_text(aes(label = sprintf("%.1f", rms)), hjust = -0.3, size = 2.9, color = PAL$ink2) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(x = "RMS shift across 7 variables", y = NULL) +
+  theme_chk() +
+  theme(axis.text.y = element_blank(), panel.grid.major.y = element_blank())
+p <- (p1 | p2) +
+  plot_layout(widths = c(3, 1.2)) +
+  plot_annotation(
+    title = "Which sanctuary changed most relative to itself, and which variables drove it",
+    subtitle = "Mean of 2016-2025 minus mean of 2003-2012, in units of each sanctuary's own 2003-2012 interannual SD",
+    theme = theme_chk())
+save_fig(p, "fig_departure.png", 9.5, 4.8)
+```
+
+## 7. A shared step in temperature
+
+Surface temperature is available from 1993 and does not depend on the ocean-colour record. For each
+sanctuary, a single-step model of the annual anomaly (break year estimated, with a BIC penalty for
+estimating it) is compared with a linear trend.
+
+```{r}
+#| label: sst_step
+
+d_sst <- d_wide |>
+  filter(date >= as_date("1993-01-01"), date <= as_date("2025-12-31")) |>
+  select(nms, date, tempSurf) |>
+  drop_na() |>
+  mutate(mo = month(date), yr = year(date)) |>
+  group_by(nms, mo) |>
+  mutate(anom = tempSurf - mean(tempSurf[yr <= 2012])) |>
+  group_by(nms, yr) |>
+  summarize(anom = mean(anom), n = n(), .groups = "drop") |>
+  filter(n == 12)
+
+d_step <- d_sst |>
+  group_by(nms) |>
+  group_modify(\(d, k) {
+    n     <- nrow(d)
+    cand  <- d$yr[6:(n - 4)]                       # at least 5 years on either side
+    bic_s <- sapply(cand, \(y) BIC(lm(anom ~ I(yr >= y), d)) + log(n))
+    y     <- cand[which.min(bic_s)]
+    m_tr  <- lm(anom ~ yr, d)
+    pre   <- d$anom[d$yr < y]
+    post  <- d$anom[d$yr >= y]
+    tibble(
+      step_year  = y,
+      step_C     = mean(post) - mean(pre),
+      step_sd    = (mean(post) - mean(pre)) / sd(pre),
+      mean_pre   = mean(pre),
+      mean_post  = mean(post),
+      yrs_above_pre_max = glue("{sum(post > max(pre))} of {length(post)}"),
+      bic_trend  = BIC(m_tr),
+      bic_step   = min(bic_s),
+      better     = case_when(
+        bic_step < bic_trend - 2 ~ "step",
+        bic_trend < bic_step - 2 ~ "trend",
+        TRUE                     ~ "neither"))
+  }) |>
+  ungroup() |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms)
+
+d_step |>
+  mutate(across(c(step_C, step_sd, bic_trend, bic_step), \(x) round(x, 2))) |>
+  select(nms, `best step year` = step_year, `step (°C)` = step_C, `step (pre-step SD)` = step_sd,
+         `post-step years above pre-step maximum` = yrs_above_pre_max,
+         `BIC trend` = bic_trend, `BIC step` = bic_step, `better model` = better) |>
+  kable(caption = "Annual surface-temperature anomaly, 1993-2025 (vs 1993-2012 monthly climatology): single step vs linear trend")
+```
+
+```{r}
+#| label: fig_sst_step
+#| fig-width: 10
+#| fig-height: 6.4
+
+d_seg <- d_step |>
+  transmute(
+    nms, step_year,
+    lab = glue("{step_year}: {sprintf('%+.2f', step_C)} °C ({better})"),
+    x1 = 1992.5, x2 = step_year - 0.5, x3 = 2025.5, mean_pre, mean_post)
+
+p <- d_sst |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  ggplot(aes(yr, anom)) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_line(color = PAL$blue, linewidth = 0.6) +
+  geom_point(color = PAL$blue, size = 0.9) +
+  geom_segment(data = d_seg, aes(x = x1, xend = x2, y = mean_pre,  yend = mean_pre),  color = PAL$ink, linewidth = 0.6) +
+  geom_segment(data = d_seg, aes(x = x2, xend = x3, y = mean_post, yend = mean_post), color = PAL$ink, linewidth = 0.6) +
+  geom_text(data = d_seg, aes(x = 1993, y = Inf, label = lab), hjust = 0, vjust = 1.4, size = 2.8, color = PAL$ink2) +
+  facet_wrap(~nms, ncol = 5) +
+  scale_x_continuous(breaks = c(1995, 2005, 2015, 2025)) +
+  labs(
+    title = "A step rather than a ramp: surface temperature shifted abruptly near 2014 in most sanctuaries",
+    subtitle = "Annual anomaly (°C) from the 1993-2012 monthly climatology; black lines = means before and after the best-fitting step year;\nlabel = step year, step size and which model BIC prefers (step vs linear trend)",
+    x = NULL, y = "annual surface-temperature anomaly (°C)") +
+  theme_chk()
+save_fig(p, "fig_sst_step.png", 10, 6.4)
+```
+
+## 8. Product checks that bear on "regime shifts"
+
+```{r}
+#| label: product_checks
+
+z |>
+  mutate(era = cut(yr, c(1997, 2002, 2011, 2016, 2026), labels = c(
+    "1998-2002 (SeaWiFS only)", "2003-2011 (+MODIS, MERIS)", "2012-2016 (+VIIRS)", "2017-2025 (+OLCI)"))) |>
+  group_by(nms, era) |>
+  summarize(CHL = round(mean(CHL), 2), .groups = "drop") |>
+  pivot_wider(names_from = era, values_from = CHL) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Mean standardised chlorophyll anomaly by ocean-colour sensor era. A step shared by sanctuaries in different basins points to the merged product, not the ocean.")
+
+z |>
+  mutate(era = cut(yr, c(1997, 2002, 2006, 2013, 2016, 2021, 2026),
+                   labels = c("1998-02", "2003-06", "2007-13", "2014-16", "2017-21", "2022-25"))) |>
+  group_by(era) |>
+  summarize(across(all_of(VARS), \(x) round(mean(x), 2)), .groups = "drop") |>
+  kable(caption = "Mean standardised anomaly by period, averaged over all 13 sanctuaries")
+
+z |>
+  group_by(nms) |>
+  summarize(
+    `r(CHL, PP)`             = round(cor(CHL, PP), 2),
+    `r(tempSurf, tempBott)`  = round(cor(tempSurf, tempBott), 2),
+    .groups = "drop") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Redundancy among response variables (monthly standardised anomalies)")
+
+d_wide |>
+  filter(date >= as_date("1998-01-01"), date <= as_date("2025-09-30")) |>
+  mutate(mo = month(date)) |>
+  group_by(nms, mo) |>
+  summarize(across(all_of(VARS), \(x) sd(x, na.rm = T) < 1e-8), .groups = "drop") |>
+  pivot_longer(all_of(VARS), names_to = "var") |>
+  filter(value) |>
+  select(nms, var, month = mo) |>
+  kable(caption = "Sanctuary × calendar-month × variable cells with zero variance (e.g., mixed-layer depth pinned at the model's shallowest level)")
+```
+
+## Session
+
+```{r}
+#| label: session
+
+sessionInfo()
+```
