@@ -1,0 +1,8 @@
+index,long_name,url,retrieved,first,last,note
+oni,Oceanic Nino Index (3-month mean Nino 3.4 SST anomaly),https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt,2026-10-03,1990-01-01,2026-07-01,3-month running mean stamped on the centre month (DJF = Jan)
+nino34,"Nino 3.4 monthly SST anomaly (HadISST, 1981-2010 base)",https://psl.noaa.gov/data/timeseries/month/data/nino34.long.anom.data,2026-10-03,1990-01-01,2026-07-01,unsmoothed monthly anomaly; -99.99 = NA
+pdo,Pacific Decadal Oscillation (ERSST v5),https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.pdo.dat,2026-10-03,1990-01-01,2026-08-01,99.99 = NA (months not yet computed)
+npgo,North Pacific Gyre Oscillation,https://www.o3d.org/npgo/data/NPGO.txt,2026-10-03,1990-01-01,2026-09-01,values since 2005 from AVISO satellite SSHa; provisional
+nao,North Atlantic Oscillation (CPC),https://www.cpc.ncep.noaa.gov/products/precip/CWlink/pna/norm.nao.monthly.b5001.current.ascii.table,2026-10-03,1990-01-01,2026-08-01,"CPC standardized monthly index, 1950 base"
+amo,"Atlantic Multidecadal Oscillation (ERSST v5 North Atlantic 0-60N SSTA, linearly detrended)",https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.amo.dat,2026-10-03,1990-01-01,2026-08-01,"NCEI ERSST v5 North Atlantic SSTA minus its 1854-latest linear trend (Enfield et al. 2001); replaces the PSL Kaplan series, which ends in early 2023"
+natl_sst,"North Atlantic 0-60N SST anomaly, ERSST v5 (not detrended)",https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.amo.dat,2026-10-03,1990-01-01,2026-08-01,undetrended source series for amo

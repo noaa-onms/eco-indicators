@@ -1,0 +1,15 @@
+nms,report_year,period,q8_status,q8_trend,q6_status,q6_trend,note,url
+OCNMS,2022,2008-2019,Fair/Poor,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2008-2019-ocnms-condition-report.pdf
+GFNMS,2024,2010-2022,Fair,Worsening,Good,Undetermined,"coastal and offshore unit; the estuarine unit is rated Fair, undetermined",https://sanctuaries.noaa.gov/media/docs/2010-2022-greater-farallones-national-marine-sanctuary-condition-report.pdf
+CBNMS,2023,2009-2021,Fair,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2009-2021-cordell-bank-national-marine-sanctuary-condition-report.pdf
+MBNMS,2015,since 2009,NA,NA,NA,NA,"partial update under the earlier question set, which has no separate climate question (offshore stressors on water quality: Fair, declining)",https://sanctuaries.noaa.gov/science/condition/monterey-bay-2015/mbnms-cr-2015-highres.pdf
+CPNMS,NA,NA,NA,NA,NA,NA,designated 30 November 2024; no condition report yet,https://sanctuaries.noaa.gov/media/chumash/2024-chnms-final-management-plan.pdf
+CINMS,2019,2009-2016,Fair,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2016-condition-report-channel-islands-nms.pdf
+PNMS,2020,2008-2019,Fair/Poor,Declining,NA,NA,State of the Monument report with its own twelve questions; the climate question is worded as in the condition reports (rated with medium confidence),https://sanctuaries.noaa.gov/media/docs/2020-state-of-papahanaumokuakea-marine-national-monument-report.pdf
+HIHWNMS,2010,NA,NA,NA,NA,NA,"earlier question set, which has no separate climate question (stressors on water quality: Good, not changing)",https://sanctuaries.noaa.gov/science/condition/pdfs/hihw_condition_report.pdf
+NMSAS,2022,2007-2020,Fair,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2022-nmsas-condition-report.pdf
+FGBNMS,2024,2009-2021,Good/Fair,Worsening,Good,Not changing,"East, West and Stetson banks",https://sanctuaries.noaa.gov/media/docs/2024-fgbnms-condition-report.pdf
+FKNMS,2011,NA,NA,NA,NA,NA,"earlier question set, which has no separate climate question (stressors on water quality: Fair, declining)",https://sanctuaries.noaa.gov/science/condition/pdfs/fknms_highres.pdf
+GRNMS,2025,2008-2022,Good/Fair,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2008-2022-grnms-condition-report.pdf
+MNMS,2008,NA,NA,NA,NA,NA,"earlier question set, which has no separate climate question (stressors on water quality: Good, not changing)",https://sanctuaries.noaa.gov/science/condition/pdfs/mnms_condition_report.pdf
+SBNMS,2020,2007-2018,Fair,Worsening,Good,Not changing,,https://sanctuaries.noaa.gov/media/docs/2020-stellwagen-condition-report.pdf

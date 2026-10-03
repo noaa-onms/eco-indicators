@@ -1,0 +1,521 @@
+---
+title: "Context data: basin-scale climate indices and independent OC-CCI chlorophyll"
+subtitle: "Inputs for the EcoIndicators Synthesis manuscript (13 National Marine Sanctuaries)"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: true
+editor_options:
+  chunk_output_type: console
+---
+
+This notebook assembles two context datasets. (1) Monthly climate indices (ENSO, PDO, NPGO, NAO, AMO) fetched
+from their authoritative public sources. (2) An independent chlorophyll product, ESA Ocean Colour Climate
+Change Initiative (OC-CCI), averaged over each sanctuary and compared with the Copernicus-GlobColour
+chlorophyll used in the state variables. Everything is cached; re-rendering works offline.
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  dplyr, ggplot2, glue, here, httr2, knitr, lubridate, purrr, readr, sf, stringr,
+  terra, tibble, tidyr, zoo, quiet = T)
+options(readr.show_col_types = F)
+sf_use_s2(TRUE)
+
+# paths ----
+dir_ctx     <- here("data/context")
+dir_raw     <- here("data/context/raw")
+dir_occci   <- here("data/context/occci")
+dir_nc      <- here("data/raw/occci")          # git-ignored netcdf
+dir_fig     <- here("figures/context")
+idx_csv     <- file.path(dir_ctx, "indices_monthly.csv")
+src_csv     <- file.path(dir_ctx, "indices_sources.csv")
+occci_csv   <- file.path(dir_ctx, "chl_occci_monthly.csv")
+cmp_csv     <- file.path(dir_ctx, "chl_product_compare.csv")
+state_csv   <- here("data/state/state_monthly.csv")
+geo_geojson <- here("data/sanctuaries.geojson")
+for (d in c(dir_ctx, dir_raw, dir_occci, dir_nc, dir_fig))
+  dir.create(d, showWarnings = F, recursive = T)
+
+# constants ----
+ERDDAP      <- "https://coastwatch.pfeg.noaa.gov/erddap/griddap"
+OCCCI_ID    <- "pmlEsaCCI60OceanColorMonthly"
+ETOPO_ID    <- "ETOPO_2022_v1_15s"
+MIN_DEPTH   <- 30     # m
+MIN_CELLS   <- 10
+BUFFER_M    <- 10000
+BUFFERED    <- c("MNMS", "GRNMS", "FGBNMS")
+NMS_ORD     <- c(
+  "OCNMS", "GFNMS", "CBNMS", "MBNMS", "CPNMS", "CINMS", "PNMS", "HIHWNMS", "NMSAS",
+  "FGBNMS", "FKNMS", "GRNMS", "MNMS", "SBNMS")
+BASE        <- c("2003-01-01", "2012-12-01")
+RECENT      <- c("2016-01-01", "2025-12-01")
+
+PAL <- list(
+  surface = "#fcfcfb", ink = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", blue = "#2a78d6", orange = "#eb6834")
+theme_chk <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background     = element_rect(fill = PAL$surface, color = NA),
+      panel.background    = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major    = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor    = element_blank(),
+      axis.text           = element_text(color = PAL$muted),
+      axis.title          = element_text(color = PAL$ink2),
+      plot.title          = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle       = element_text(color = PAL$ink2),
+      plot.caption        = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position = "plot",
+      strip.text          = element_text(color = PAL$ink, face = "bold", hjust = 0),
+      legend.position     = "top",
+      legend.justification = "left",
+      legend.title        = element_text(color = PAL$ink2),
+      legend.text         = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 200, bg = PAL$surface)
+  p
+}
+```
+
+## Part 1. Climate indices
+
+```{r}
+#| label: indices-fetch
+
+# source table: one row per index ----
+SRC <- tribble(
+  ~index,  ~long_name,                                  ~url,
+  "oni",   "Oceanic Nino Index (3-month mean Nino 3.4 SST anomaly)",
+           "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt",
+  "nino34", "Nino 3.4 monthly SST anomaly (HadISST, 1981-2010 base)",
+           "https://psl.noaa.gov/data/timeseries/month/data/nino34.long.anom.data",
+  "pdo",   "Pacific Decadal Oscillation (ERSST v5)",
+           "https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.pdo.dat",
+  "npgo",  "North Pacific Gyre Oscillation",
+           "https://www.o3d.org/npgo/data/NPGO.txt",
+  "nao",   "North Atlantic Oscillation (CPC)",
+           "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/pna/norm.nao.monthly.b5001.current.ascii.table",
+  "amo",   "Atlantic Multidecadal Oscillation (ERSST v5 North Atlantic 0-60N SSTA, linearly detrended)",
+           "https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.amo.dat",
+  "natl_sst", "North Atlantic 0-60N SST anomaly, ERSST v5 (not detrended)",
+           "https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.amo.dat")
+NOTE <- c(
+  oni    = "3-month running mean stamped on the centre month (DJF = Jan)",
+  nino34 = "unsmoothed monthly anomaly; -99.99 = NA",
+  pdo    = "99.99 = NA (months not yet computed)",
+  npgo   = "values since 2005 from AVISO satellite SSHa; provisional",
+  nao    = "CPC standardized monthly index, 1950 base",
+  amo    = paste(
+    "NCEI ERSST v5 North Atlantic SSTA minus its 1854-latest linear trend (Enfield et al. 2001);",
+    "replaces the PSL Kaplan series, which ends in early 2023"),
+  natl_sst = "undetrended source series for amo")
+
+# download once, keep raw text, record retrieval date ----
+ret_csv <- file.path(dir_raw, "retrieved.csv")
+ret <- if (file.exists(ret_csv)) read_csv(ret_csv) else tibble(index = character(), retrieved = character())
+for (i in seq_len(nrow(SRC))) {
+  f <- file.path(dir_raw, glue("{if (SRC$index[i] == 'natl_sst') 'amo' else SRC$index[i]}.txt"))
+  if (!file.exists(f)) {
+    request(SRC$url[i]) |> req_retry(max_tries = 3) |> req_perform(path = f)
+    ret <- bind_rows(filter(ret, index != SRC$index[i]),
+                     tibble(index = SRC$index[i], retrieved = as.character(Sys.Date())))
+    Sys.sleep(1)
+  }
+}
+ret <- bind_rows(filter(ret, index != "natl_sst"), mutate(filter(ret, index == "amo"), index = "natl_sst"))
+write_csv(ret, ret_csv)
+```
+
+```{r}
+#| label: indices-parse
+
+rd <- function(idx) read_lines(file.path(dir_raw, glue("{idx}.txt")))
+na_if_code <- function(x, codes) replace(x, x %in% codes | x <= -99, NA_real_)
+
+# wide year x 12-month rows (pdo, nao, nino34) ----
+parse_wide <- function(idx, na_codes = c(99.99, -99.99, -99.9)) {
+  rd(idx) |>
+    str_trim() |>
+    keep(\(l) str_detect(l, "^[0-9]{4}( +-?[0-9.]+){1,12}$")) |>
+    map_dfr(\(l) {
+      v <- as.numeric(str_split_1(l, " +"))
+      tibble(year = v[1], month = seq_along(v[-1]), value = v[-1])
+    }) |>
+    mutate(
+      date  = make_date(year, month, 1),
+      index = idx,
+      value = na_if_code(value, na_codes)) |>
+    select(date, index, value)
+}
+
+oni <- rd("oni") |>
+  str_trim() |>
+  keep(\(l) str_detect(l, "^[A-Z]{3} [0-9]{4} ")) |>
+  map_dfr(\(l) {
+    p <- str_split_1(l, " +")
+    tibble(seas = p[1], year = as.numeric(p[2]), value = as.numeric(p[4]))
+  }) |>
+  mutate(
+    month = match(seas, c("DJF","JFM","FMA","MAM","AMJ","MJJ","JJA","JAS","ASO","SON","OND","NDJ")),
+    date  = make_date(year, month, 1),
+    index = "oni") |>
+  select(date, index, value)
+# centre month of DJF is January of the stated year: month = position in the list
+
+npgo <- rd("npgo") |>
+  str_trim() |>
+  keep(\(l) !str_starts(l, "#") & nchar(l) > 0) |>
+  map_dfr(\(l) {
+    v <- as.numeric(str_split_1(l, " +"))
+    tibble(date = make_date(v[1], v[2], 1), index = "npgo", value = v[3])
+  })
+
+amo <- rd("amo") |>
+  str_trim() |>
+  keep(\(l) str_detect(l, "^[0-9]{4} +[0-9]{1,2} +-?[0-9.]+$")) |>
+  map_dfr(\(l) {
+    v <- as.numeric(str_split_1(l, " +"))
+    tibble(date = make_date(v[1], v[2], 1), index = "natl_sst", value = na_if_code(v[3], 99.99))
+  })
+
+# amo: linear trend over the full record (1854 to latest) removed (Enfield et al. 2001)
+amo <- amo |>
+  filter(!is.na(value)) |>
+  mutate(
+    t     = as.numeric(date),
+    value = value - fitted(lm(value ~ t)),
+    index = "amo") |>
+  select(date, index, value) |>
+  bind_rows(amo)
+
+idx <- bind_rows(
+  oni, parse_wide("nino34"), parse_wide("pdo"), npgo, parse_wide("nao"), amo) |>
+  filter(date >= as.Date("1990-01-01")) |>
+  arrange(match(index, SRC$index), date)
+
+# drop trailing NA months so "last" means last month with data
+idx <- idx |> filter(!is.na(value))
+write_csv(idx, idx_csv)
+
+src <- SRC |>
+  left_join(ret, by = "index") |>
+  left_join(
+    idx |> summarize(first = min(date), last = max(date), .by = index), by = "index") |>
+  mutate(note = NOTE[index]) |>
+  select(index, long_name, url, retrieved, first, last, note)
+write_csv(src, src_csv)
+```
+
+### Sources and coverage
+
+```{r}
+#| label: tbl-sources
+
+src |>
+  mutate(first = format(first, "%Y-%m"), last = format(last, "%Y-%m")) |>
+  select(index, long_name, retrieved, first, last, note) |>
+  kable()
+```
+
+The `amo` index is the ERSST v5 North Atlantic (0-60N) SST anomaly with its linear trend over the full record (1854 to latest) removed, following Enfield et al. (2001); a linear detrend leaves some of the recent non-linear warming in the index. The undetrended series is kept as `natl_sst`.
+
+Full URLs are in `data/context/indices_sources.csv`. Raw text files are kept in `data/context/raw/`.
+
+```{r}
+#| label: fig-indices
+#| fig-height: 7
+
+p_idx <- idx |>
+  filter(index %in% c("oni", "pdo", "npgo", "nao", "amo"), between(date, as.Date("2003-01-01"), as.Date("2025-12-01"))) |>
+  mutate(index = factor(toupper(index), toupper(c("oni", "pdo", "npgo", "nao", "amo")))) |>
+  ggplot(aes(date, value)) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_line(color = PAL$blue, linewidth = 0.4) +
+  facet_wrap(~index, ncol = 1, scales = "free_y", strip.position = "left") +
+  labs(x = NULL, y = NULL, title = "Climate indices, 2003-2025",
+       subtitle = "monthly values; each panel has its own scale") +
+  theme_chk() + theme(strip.placement = "outside")
+save_fig(p_idx, "indices_2003-2025.png", 9, 7)
+```
+
+## Part 2. OC-CCI chlorophyll per sanctuary
+
+Source: ESA OC-CCI v6.0 monthly chlorophyll-a (`chlor_a`, about 4 km) served as `pmlEsaCCI60OceanColorMonthly`
+by NOAA CoastWatch ERDDAP. Pixels whose centres fall inside the sanctuary polygon are used
+(Monitor, Gray's Reef and Flower Garden Banks: polygon buffered by 10 km because the polygons are smaller than a
+pixel or a few pixels). `chl_occci_all` is the arithmetic mean of all pixels. `chl_occci` is the
+spatial geometric mean (mean of log10, back-transformed) of pixels at least 30 m deep (ETOPO 2022 15 arc-second
+relief, averaged to the pixel grid); with fewer than 10 such pixels all pixels are used and the `rule` says so.
+
+```{r}
+#| label: occci-fetch
+
+nms_sf <- st_read(geo_geojson, quiet = T) |>
+  filter(nms %in% setdiff(NMS_ORD, "PNMS")) |>
+  st_make_valid() |>
+  group_by(nms) |>
+  summarize(geometry = st_union(geometry), .groups = "drop")
+stopifnot(setequal(nms_sf$nms, setdiff(NMS_ORD, "PNMS")))
+
+poly_for <- function(code) {
+  g <- nms_sf |> filter(nms == code) |> st_geometry()
+  if (code %in% BUFFERED) g <- st_buffer(g, BUFFER_M)
+  g
+}
+
+# five-year chunks; last chunk ends at the latest available month
+CHUNKS <- tibble(
+  y0 = seq(1997, 2022, by = 5)) |>
+  mutate(
+    t0 = if_else(y0 == 1997, "1997-09-01", glue("{y0}-01-01")),
+    t1 = if_else(y0 == 2022, "last", glue("{y0 + 4}-12-01")))
+
+get_nc <- function(url, f) {
+  if (file.exists(f)) return(invisible(f))
+  request(url) |> req_retry(max_tries = 5, backoff = \(i) 5 * i) |>
+    req_timeout(300) |> req_perform(path = f)
+  Sys.sleep(1)
+  invisible(f)
+}
+
+occci_nms <- function(code) {
+  out_csv <- file.path(dir_occci, glue("{code}.csv"))
+  if (file.exists(out_csv)) return(read_csv(out_csv))
+  g  <- poly_for(code)
+  bb <- st_bbox(g)
+  pad <- 0.05
+  la <- c(bb["ymin"] - pad, bb["ymax"] + pad)
+  lo <- c(bb["xmin"] - pad, bb["xmax"] + pad)
+  # chlorophyll chunks
+  fs <- pmap_chr(CHUNKS, \(y0, t0, t1) {
+    f <- file.path(dir_nc, glue("{code}_{y0}.nc"))
+    u <- glue("{ERDDAP}/{OCCCI_ID}.nc?chlor_a[({t0}):1:{if (t1 == 'last') '(last)' else glue('({t1})')}]",
+              "[({la[1]}):1:({la[2]})][({lo[1]}):1:({lo[2]})]")
+    get_nc(u, f)
+    f
+  })
+  ef <- file.path(dir_nc, glue("etopo_{code}.nc"))
+  get_nc(glue("{ERDDAP}/{ETOPO_ID}.nc?z[({la[1]}):2:({la[2]})][({lo[1]}):2:({lo[2]})]"), ef)
+
+  rs   <- map(fs, \(f) rast(f, subds = "chlor_a"))
+  tmpl <- rs[[1]][[1]]
+  # pixel centres inside the polygon
+  inside <- rasterize(vect(g), tmpl, field = 1, touches = FALSE) |> values() |> as.vector() |> is.finite()
+  z      <- resample(rast(ef), tmpl, method = "average") |> values() |> as.vector()
+  deep   <- inside & !is.na(z) & z <= -MIN_DEPTH
+  use_deep <- sum(deep) >= MIN_CELLS
+  sel_deep <- if (use_deep) deep else inside
+  rule <- if (use_deep) glue("depth >= {MIN_DEPTH} m") else glue("all pixels (<{MIN_CELLS} pixels deeper than {MIN_DEPTH} m)")
+
+  map_dfr(rs, \(r) {
+    m <- values(r)
+    m[!is.finite(m) | m <= 0] <- NA
+    tibble(
+      date          = as.Date(time(r)) |> floor_date("month"),
+      chl_occci_all = apply(m[inside, , drop = F], 2, \(x) if (all(is.na(x))) NA_real_ else mean(x, na.rm = T)),
+      n_cells_all   = colSums(!is.na(m[inside, , drop = F])),
+      chl_occci     = apply(m[sel_deep, , drop = F], 2, \(x) if (all(is.na(x))) NA_real_ else 10^mean(log10(x), na.rm = T)),
+      n_cells       = colSums(!is.na(m[sel_deep, , drop = F])),
+      rule          = as.character(rule),
+      n_inside      = sum(inside),
+      n_deep        = sum(deep))
+  }) |>
+    mutate(nms = code) |>
+    select(nms, date, chl_occci, chl_occci_all, n_cells, n_cells_all, rule, n_inside, n_deep) |>
+    arrange(date) |>
+    write_csv(out_csv)
+  read_csv(out_csv)
+}
+
+# PNMS: two parts split at the antimeridian, one box each, yearly chunks, cos(lat) weights ----
+PNMS_STRIDE <- 1    # chlorophyll stride (1 = full 4 km resolution)
+occci_pnms <- function(code = "PNMS") {
+  out_csv <- file.path(dir_occci, glue("{code}.csv"))
+  if (file.exists(out_csv)) return(read_csv(out_csv))
+  g <- st_read(here("data/state/pnms.geojson"), quiet = T) |> st_geometry()   # no s2 make_valid: it clips the antimeridian parts
+  boxes <- list(east = c(177, 180), west = c(-180, -161))
+  parts <- imap(boxes, \(lonr, nm) {
+    # planar intersection: spherical (s2) edges misread boxes touching the antimeridian
+    sf_use_s2(FALSE)
+    part <- st_intersection(st_make_valid(st_buffer(g, 0)), st_as_sfc(st_bbox(c(xmin = lonr[1], xmax = lonr[2], ymin = 19, ymax = 32), crs = 4326)))
+    sf_use_s2(TRUE)
+    bb   <- st_bbox(part)
+    la <- unname(c(bb["ymin"] - 0.05, bb["ymax"] + 0.05))
+    lo <- unname(c(max(-180, bb["xmin"] - 0.05), min(180, bb["xmax"] + 0.05)))
+    ef <- file.path(dir_nc, glue("etopo_{code}_{nm}.nc"))
+    get_nc(glue("{ERDDAP}/{ETOPO_ID}.nc?z[({la[1]}):4:({la[2]})][({lo[1]}):4:({lo[2]})]"), ef)
+    yrs <- 1997:2026
+    fs <- map_chr(yrs, \(y) {
+      t0 <- if (y == 1997) "1997-09-01" else glue("{y}-01-01")
+      t1 <- if (y == 2026) "(last)" else glue("({y}-12-01)")
+      f  <- file.path(dir_nc, glue("{code}_{nm}_{y}.nc"))
+      get_nc(glue("{ERDDAP}/{OCCCI_ID}.nc?chlor_a[({t0}):1:{t1}]",
+                  "[({la[1]}):{PNMS_STRIDE}:({la[2]})][({lo[1]}):{PNMS_STRIDE}:({lo[2]})]"), f)
+      f
+    })
+    tmpl   <- rast(fs[1], subds = "chlor_a")[[1]]
+    inside <- rasterize(vect(part), tmpl, field = 1, touches = FALSE) |> values() |> as.vector() |> is.finite()
+    z      <- resample(rast(ef), tmpl, method = "average") |> values() |> as.vector()
+    deep   <- inside & !is.na(z) & z <= -MIN_DEPTH
+    w      <- cos(yFromCell(tmpl, seq_len(ncell(tmpl))) * pi / 180)
+    list(
+      n_inside = sum(inside), n_deep = sum(deep),
+      sums = map_dfr(fs, \(f) {
+        r <- rast(f, subds = "chlor_a"); m <- values(r); m[!is.finite(m) | m <= 0] <- NA
+        sm <- \(sel, fn) apply(m[sel, , drop = F], 2, \(x) sum(fn(x) * w[sel], na.rm = T))
+        sw <- \(sel) apply(m[sel, , drop = F], 2, \(x) sum(w[sel][!is.na(x)]))
+        tibble(
+          date = as.Date(time(r)) |> floor_date("month"),
+          a_s = sm(inside, identity), a_w = sw(inside), a_n = colSums(!is.na(m[inside, , drop = F])),
+          d_s = sm(deep, log10),      d_w = sw(deep),   d_n = colSums(!is.na(m[deep, , drop = F])))
+      }))
+  })
+  n_in <- sum(map_dbl(parts, "n_inside")); n_dp <- sum(map_dbl(parts, "n_deep"))
+  use_deep <- n_dp >= MIN_CELLS
+  rule <- paste0(
+    if (use_deep) glue("depth >= {MIN_DEPTH} m") else "all pixels (<10 deep pixels)",
+    glue("; cos(lat) weighted; two parts at the antimeridian; chlorophyll stride {PNMS_STRIDE}"))
+  map(parts, "sums") |> bind_rows() |>
+    summarize(across(c(a_s, a_w, a_n, d_s, d_w, d_n), sum), .by = date) |>
+    arrange(date) |>
+    transmute(
+      nms = code, date,
+      chl_occci     = if (use_deep) if_else(d_w > 0, 10^(d_s / d_w), NA_real_) else if_else(a_w > 0, a_s / a_w, NA_real_),
+      chl_occci_all = if_else(a_w > 0, a_s / a_w, NA_real_),
+      n_cells       = if (use_deep) d_n else a_n,
+      n_cells_all   = a_n, rule = as.character(rule), n_inside = n_in, n_deep = n_dp) |>
+    write_csv(out_csv)
+  read_csv(out_csv)
+}
+
+occci_full <- map_dfr(NMS_ORD, \(code) if (code == "PNMS") occci_pnms() else occci_nms(code))
+occci <- occci_full |> select(nms, date, chl_occci, chl_occci_all, n_cells, n_cells_all, rule)
+write_csv(occci, occci_csv)
+```
+
+```{r}
+#| label: tbl-pixels
+
+occci_full |>
+  summarize(
+    pixels_all = first(n_inside), pixels_ge30m = first(n_deep), rule = first(rule),
+    first = format(min(date), "%Y-%m"), last = format(max(date), "%Y-%m"), .by = nms) |>
+  kable()
+```
+
+## Comparison with Copernicus-GlobColour chlorophyll
+
+PNMS is included in the comparison only when GlobColour `chl_all` exists for it in the state file. Like with like: GlobColour `chl_all` (all pixels, no depth mask) against `chl_occci_all`. Anomalies are
+log10 values minus the calendar-month mean of 2003-2012. The change is the mean log10 chlorophyll in 2016-2025
+minus 2003-2012, in units of that product's own 2003-2012 anomaly SD. `delta_sd_occci_deep` is the same for
+the depth-masked OC-CCI series.
+
+```{r}
+#| label: compare
+
+gc <- read_csv(state_csv) |>
+  filter(var == "chl_all") |>
+  transmute(nms, date = as.Date(date), gc = log10(value))
+stopifnot(nrow(gc) > 0)
+
+anom <- function(d, col) {
+  clim <- d |> filter(between(date, as.Date(BASE[1]), as.Date(BASE[2]))) |>
+    summarize(clim = mean(.data[[col]], na.rm = T), .by = c(nms, m)) 
+  d |> left_join(clim, by = c("nms", "m")) |> mutate("{col}_a" := .data[[col]] - clim) |> select(-clim)
+}
+
+cmp_d <- occci |>
+  transmute(nms, date, oc = log10(chl_occci_all), oc_deep = log10(chl_occci)) |>
+  inner_join(gc, by = c("nms", "date")) |>
+  mutate(m = month(date)) |>
+  anom("oc") |> anom("oc_deep") |> anom("gc")
+
+seg <- function(d, col) {
+  b <- d |> filter(between(date, as.Date(BASE[1]), as.Date(BASE[2])))
+  r <- d |> filter(between(date, as.Date(RECENT[1]), as.Date(RECENT[2])))
+  (mean(r[[col]], na.rm = T) - mean(b[[col]], na.rm = T)) / sd(b[[paste0(col, "_a")]], na.rm = T)
+}
+
+compare <- cmp_d |>
+  group_split(nms) |>
+  map_dfr(\(d) tibble(
+    nms                 = d$nms[1],
+    n_months            = sum(!is.na(d$oc) & !is.na(d$gc)),
+    r_log               = cor(d$oc, d$gc, use = "complete.obs"),
+    r_anom              = cor(d$oc_a, d$gc_a, use = "complete.obs"),
+    delta_sd_occci      = seg(d, "oc"),
+    delta_sd_globcolour = seg(d, "gc"),
+    delta_sd_occci_deep = seg(d, "oc_deep"))) |>
+  arrange(match(nms, NMS_ORD)) |>
+  mutate(across(where(is.double), \(x) round(x, 3)))
+write_csv(compare, cmp_csv)
+```
+
+```{r}
+#| label: tbl-compare
+
+kable(compare)
+```
+
+```{r}
+#| label: fig-compare
+#| fig-height: 8
+
+p_cmp <- cmp_d |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms, date) |>
+  group_by(nms) |>
+  mutate(
+    `OC-CCI`         = rollapply(oc_a, 12, mean, fill = NA, align = "center"),
+    `GlobColour`     = rollapply(gc_a, 12, mean, fill = NA, align = "center")) |>
+  ungroup() |>
+  pivot_longer(c(`OC-CCI`, GlobColour), names_to = "product", values_to = "anom") |>
+  ggplot(aes(date, anom, color = product)) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.3) +
+  geom_line(linewidth = 0.4, na.rm = T) +
+  scale_color_manual(values = c("OC-CCI" = PAL$orange, GlobColour = PAL$blue), name = NULL) +
+  facet_wrap(~nms, ncol = 3) +
+  labs(x = NULL, y = "log10 chlorophyll anomaly (12-month mean)",
+       title = "Two chlorophyll products, per sanctuary",
+       subtitle = "anomaly from the 2003-2012 calendar-month mean; all pixels") +
+  theme_chk()
+save_fig(p_cmp, "chl_product_compare.png", 9, 8)
+```
+
+## Checks
+
+```{r}
+#| label: checks
+
+# indices
+stopifnot(
+  identical(names(idx), c("date", "index", "value")),
+  all(day(idx$date) == 1), !anyNA(idx$value),
+  all(c("oni", "pdo", "npgo", "nao", "amo", "natl_sst") %in% idx$index),
+  min(idx$date) == as.Date("1990-01-01"),
+  nrow(distinct(idx, date, index)) == nrow(idx),
+  identical(names(src), c("index", "long_name", "url", "retrieved", "first", "last", "note")),
+  !anyNA(src$retrieved), all(src$last >= as.Date("2025-01-01") | src$index %in% c("amo", "natl_sst")))
+
+# occci
+stopifnot(
+  identical(names(occci), c("nms", "date", "chl_occci", "chl_occci_all", "n_cells", "n_cells_all", "rule")),
+  setequal(occci$nms, NMS_ORD), all(day(occci$date) == 1),
+  min(occci$date) == as.Date("1997-09-01"),
+  max(occci$date) >= as.Date("2025-09-01"),
+  nrow(distinct(occci, nms, date)) == nrow(occci),
+  all(table(occci$nms) == n_distinct(occci$date)),
+  all(occci$chl_occci > 0, na.rm = T))
+stopifnot(setequal(compare$nms, intersect(NMS_ORD, gc$nms)), length(NMS_ORD) == 14, identical(names(compare)[1], "nms"))
+cat("all checks passed\n")
+```
