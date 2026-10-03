@@ -1,0 +1,17 @@
+grid,ds,dataset_id,version_requested,version_used,pinned,file,mb,seconds
+PNMS-west,phy,cmems_mod_glo_phy_my_0.083deg_P1M-m,202311,202311,TRUE,PNMS-west_phy.nc,111.6,11
+PNMS-west,chl,cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M,202411,202603,FALSE,PNMS-west_chl.nc,192.9,11
+PNMS-west,pp,cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M,202311,202603,FALSE,PNMS-west_pp.nc,192.9,12
+PNMS-west,deptho,cmems_mod_glo_phy_my_0.083deg_static,NA,202311,FALSE,PNMS-west_deptho.nc,0.2,4
+PNMS-west,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-west_precip_1998.nc,16.4,5
+PNMS-west,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-west_precip_2005.nc,16.4,4
+PNMS-west,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-west_precip_2012.nc,16.4,5
+PNMS-west,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-west_precip_2019.nc,15.8,5
+PNMS-east,phy,cmems_mod_glo_phy_my_0.083deg_P1M-m,202311,202311,TRUE,PNMS-east_phy.nc,6.5,10
+PNMS-east,chl,cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M,202411,202603,FALSE,PNMS-east_chl.nc,11.2,6
+PNMS-east,pp,cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M,202311,202603,FALSE,PNMS-east_pp.nc,11.2,6
+PNMS-east,deptho,cmems_mod_glo_phy_my_0.083deg_static,NA,202311,FALSE,PNMS-east_deptho.nc,0,3
+PNMS-east,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-east_precip_1998.nc,1,3
+PNMS-east,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-east_precip_2005.nc,1,3
+PNMS-east,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-east_precip_2012.nc,1,3
+PNMS-east,precip,IMERG_monthly_global_precip,NA,NA,NA,PNMS-east_precip_2019.nc,1,2

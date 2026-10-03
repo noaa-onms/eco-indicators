@@ -1,0 +1,909 @@
+---
+title: "State variables: monthly environmental state of 14 sanctuaries"
+subtitle: "Re-derived from the Copernicus NetCDFs with depth masks and small-sanctuary buffers"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: false
+editor_options:
+  chunk_output_type: console
+---
+
+This notebook rebuilds the monthly sanctuary averages in [copernicus](copernicus.html) from the NetCDF
+files already on disk and changes two things:
+
+- **Bottom temperature (`sbt`) uses shelf cells only**, i.e. model cells with seafloor depth <= 200 m
+  (GLORYS12V1 static `deptho`). The old polygon mean mixed shelf and abyssal water.
+- **Chlorophyll (`chl`) and primary production (`pp`) use optically deep pixels only** (ETOPO 2022 depth
+  >= 30 m, averaged onto the 4 km grid), summarised as a spatial geometric mean.
+
+Monitor, Gray's Reef and Flower Garden Banks cover only 1-4 model cells, so for every variable their
+polygon is buffered by 10 km. The old definitions are kept as `sbt_all` and `chl_all` and must reproduce
+`data/copernicus.csv`. Precipitation is copied from `data/erddap.csv`.
+
+Papahānaumokuākea (`PNMS`, designated 2025) is not in the old extracts. Its physics, ocean colour,
+bathymetry and precipitation are downloaded here for the two polygon parts on either side of the
+antimeridian (one box each). Because the polygon spans 12.5 degrees of latitude, every PNMS mean is
+weighted by cos(latitude).
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  dplyr, ggplot2, glue, here, knitr, patchwork, purrr, readr, sf, stringr,
+  terra, tibble, tidyr,
+  quiet = T)
+options(readr.show_col_types = F, timeout = 3600)
+
+# paths ----
+dir_cm         <- here("data/copernicus")
+dir_state      <- here("data/state")
+dir_bathy      <- here("data/state/bathy")
+dir_pnms       <- here("data/raw/pnms")                   # git-ignored downloads for PNMS
+dir_fig        <- here("figures/state")
+ply_geo        <- here("data/sanctuaries.geojson")
+pnms_geo       <- file.path(dir_state, "pnms.geojson")
+copernicus_csv <- here("data/copernicus.csv")
+erddap_csv     <- here("data/erddap.csv")
+phy_depth_csv  <- file.path(dir_bathy, "phy_depth.csv")   # glorys deptho on each physics grid
+oc_depth_csv   <- file.path(dir_bathy, "oc_depth.csv")    # etopo 2022 averaged onto each 4 km grid
+chnms_geo      <- file.path(dir_state, "chnms_designated.geojson")
+pnms_log_csv   <- file.path(dir_state, "pnms_downloads.csv")
+monthly_csv    <- file.path(dir_state, "state_monthly.csv")
+cells_csv      <- file.path(dir_state, "state_cells.csv")
+compare_csv    <- file.path(dir_state, "state_compare.csv")
+cmt_cli        <- path.expand("~/.virtualenvs/CopernicusMarine/bin/copernicusmarine")
+dir.create(dir_bathy, showWarnings = F, recursive = T)
+dir.create(dir_pnms,  showWarnings = F, recursive = T)
+dir.create(dir_fig,   showWarnings = F, recursive = T)
+
+# constants ----
+NMS_ORD <- c(
+  "OCNMS", "GFNMS", "CBNMS", "MBNMS", "CPNMS", "CINMS", "PNMS", "HIHWNMS", "NMSAS",
+  "FGBNMS", "FKNMS", "GRNMS", "MNMS", "SBNMS")
+NMS_CM    <- setdiff(NMS_ORD, "PNMS")       # the 13 in data/copernicus/ and data/copernicus.csv
+NMS_COS   <- "PNMS"                         # means weighted by cos(latitude)
+NMS_BUF   <- c("MNMS", "GRNMS", "FGBNMS")   # tiny sanctuaries: polygon + 10 km
+BUF_M     <- 10000
+SHELF_M   <- 200                            # sbt: model depth <= 200 m
+SHELF_MIN <- 3                              # fewer shelf cells -> sbt NA
+OPT_M     <- 30                             # chl, pp: depth >= 30 m is optically deep
+OPT_MIN   <- 10                             # fewer deep pixels -> use all pixels
+TOL       <- 1e-4                           # agreement with data/copernicus.csv
+PNMS_PAD  <- 0.1                            # deg padding of each PNMS part box
+DS <- c(
+  phy = "cmems_mod_glo_phy_my_0.083deg_P1M-m",
+  chl = "cmems_obs-oc_glo_bgc-plankton_my_l4-multi-4km_P1M",
+  pp  = "cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M")
+DS_STATIC <- "cmems_mod_glo_phy_my_0.083deg_static"
+PNMS_VER  <- c(phy = "202311", chl = "202411", pp = "202311")   # versions when the old extracts were pulled
+VARS_OUT  <- c("sst", "sbt", "sss", "mld", "chl", "pp", "precip", "sbt_all", "chl_all")
+ETOPO_URL <- "https://coastwatch.pfeg.noaa.gov/erddap/griddap/ETOPO_2022_v1_15s"
+IMERG_URL <- "https://erddap.marine.usf.edu/erddap/griddap/IMERG_monthly_global_precip"
+CHNMS_URL <- "https://sanctuaries.noaa.gov/media/gis/chnms_py.zip"
+
+# plot theme (from trajectory_checks.qmd) ----
+PAL <- list(
+  surface = "#fcfcfb", ink = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", blue = "#2a78d6", orange = "#eb6834")
+
+theme_chk <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background    = element_rect(fill = PAL$surface, color = NA),
+      panel.background   = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major   = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = PAL$muted),
+      axis.title         = element_text(color = PAL$ink2),
+      plot.title         = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle      = element_text(color = PAL$ink2),
+      plot.caption       = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position = "plot",
+      strip.text         = element_text(color = PAL$ink, face = "bold", hjust = 0),
+      legend.position    = "top",
+      legend.justification = "left",
+      legend.title       = element_text(color = PAL$ink2),
+      legend.text        = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 200, bg = PAL$surface)
+  p
+}
+```
+
+## Inputs
+
+```{r}
+#| label: inputs
+
+# netcdf files per sanctuary and dataset ('my' only; 'myint' duplicates 'my') ----
+nc_files <- function(nms, ds) {
+  f <- list.files(file.path(dir_cm, nms), full.names = T)
+  f[startsWith(basename(f), paste0(DS[[ds]], "_multi-vars"))]
+}
+
+# last month the 13 sanctuaries have, per dataset (PNMS is downloaded to the same end) ----
+last_month <- function(ds) {
+  var <- c(phy = "bottomT", chl = "CHL", pp = "PP")[[ds]]
+  map(NMS_CM, \(n) map(nc_files(n, ds), \(f) as.Date(time(rast(f, subds = var))))) |>
+    unlist() |> as.Date() |> max()
+}
+END <- map(names(DS), last_month) |> set_names(names(DS))
+stopifnot(END$chl == END$pp)
+
+# polygons ----
+ply_pnms <- read_sf(pnms_geo) |> select(sanctuary, nms)
+stopifnot(nrow(ply_pnms) == 1, ply_pnms$nms == "PNMS")
+ply_all <- read_sf(ply_geo) |>
+  filter(nms %in% NMS_CM) |>
+  select(sanctuary, nms) |>
+  bind_rows(ply_pnms)
+stopifnot(setequal(ply_all$nms, NMS_ORD))
+
+# polygon used for the masked variables: buffered for the tiny sanctuaries
+ply_use <- ply_all
+i_buf   <- which(ply_use$nms %in% NMS_BUF)
+st_geometry(ply_use)[i_buf] <- st_cast(st_buffer(st_geometry(ply_use)[i_buf], BUF_M), "MULTIPOLYGON")
+ply_use$area_km2 <- as.numeric(st_area(ply_use)) / 1e6
+ply_all$area_km2 <- as.numeric(st_area(ply_all)) / 1e6
+
+# pnms: one box per polygon part, padded, never across the antimeridian ----
+pnms_box <- map(st_cast(st_geometry(ply_pnms), "POLYGON"), \(g) {
+  b <- st_bbox(g)
+  c(xmin = max(-180, b[["xmin"]] - PNMS_PAD), xmax = min(180, b[["xmax"]] + PNMS_PAD),
+    ymin = b[["ymin"]] - PNMS_PAD,            ymax = b[["ymax"]] + PNMS_PAD)
+})
+names(pnms_box) <- if_else(map_dbl(pnms_box, "xmin") > 0, "PNMS-east", "PNMS-west")
+stopifnot(setequal(names(pnms_box), c("PNMS-east", "PNMS-west")))
+
+# grids: one per sanctuary, two for pnms ----
+d_grid <- bind_rows(
+  tibble(grid = NMS_CM, nms = NMS_CM),
+  tibble(grid = names(pnms_box), nms = "PNMS"))
+grid_files <- function(grid, ds) {
+  if (startsWith(grid, "PNMS")) file.path(dir_pnms, glue("{grid}_{ds}.nc")) else nc_files(grid, ds)
+}
+```
+
+### Papahānaumokuākea downloads
+
+Physics, chlorophyll and primary production from Copernicus Marine (toolbox CLI), pinned to the product
+versions of the old extracts where still served; IMERG precipitation from the USF ERDDAP. Files are cached
+under `data/raw/pnms/` (git-ignored); the log of what was fetched is `data/state/pnms_downloads.csv`.
+
+```{r}
+#| label: pnms-download
+
+cm_get <- function(grid, ds, vars, t0 = NULL, t1 = NULL, depth = F) {
+  nc    <- file.path(dir_pnms, glue("{grid}_{ds}.nc"))
+  b     <- pnms_box[[grid]]
+  ds_id <- if (ds == "deptho") DS_STATIC else DS[[ds]]
+  ver   <- if (ds %in% names(PNMS_VER)) PNMS_VER[[ds]] else NA_character_
+  args  <- c(
+    "subset", "--dataset-id", ds_id, as.vector(rbind("--variable", vars)),
+    "--minimum-longitude", b[["xmin"]], "--maximum-longitude", b[["xmax"]],
+    "--minimum-latitude",  b[["ymin"]], "--maximum-latitude",  b[["ymax"]],
+    if (!is.null(t0)) c("--start-datetime", glue("{t0}T00:00:00"), "--end-datetime", glue("{t1}T00:00:00")),
+    if (depth) c("--minimum-depth", 0, "--maximum-depth", 0.5),
+    "--output-directory", dir_pnms, "--output-filename", basename(nc), "--disable-progress-bar")
+  run <- function(a) {
+    secs <- system.time(
+      out <- suppressWarnings(system2(cmt_cli, a, stdout = T, stderr = T)))[["elapsed"]]
+    list(out = out, ok = is.null(attr(out, "status")) && file.exists(nc), secs = secs)
+  }
+  r      <- if (is.na(ver)) run(args) else run(c(args, "--dataset-version", ver))
+  pinned <- !is.na(ver) && r$ok
+  if (!r$ok) r <- run(args)                        # pinned version no longer served: use the current one
+  stopifnot(r$ok)
+  v_used <- na.omit(str_match(r$out, 'Selected dataset version: "([0-9]+)"')[, 2])[1]
+  tibble(
+    grid, ds, dataset_id = ds_id, version_requested = ver, version_used = v_used, pinned,
+    file = basename(nc), mb = round(file.size(nc) / 1e6, 1), seconds = round(r$secs))
+}
+
+im_get <- function(grid) {
+  b  <- pnms_box[[grid]]
+  t0 <- seq(as.Date("1998-01-01"), as.Date("2025-09-01"), by = "7 years")
+  t1 <- c(t0[-1] - 31, as.Date("2025-09-01"))
+  t1 <- as.Date(format(t1, "%Y-%m-01"))
+  map2(t0, t1, \(a, z) {
+    nc <- file.path(dir_pnms, glue("{grid}_precip_{format(a, '%Y')}.nc"))
+    q  <- glue(
+      "{IMERG_URL}.nc?precipitation[({a}T00:00:00Z):1:({z}T00:00:00Z)]",
+      "[({b[['ymin']]}):1:({b[['ymax']]})][({max(b[['xmin']], -179.95)}):1:({min(b[['xmax']], 179.95)})]")
+    secs <- system.time(download.file(URLencode(q), nc, quiet = T, mode = "wb"))[["elapsed"]]
+    tibble(
+      grid, ds = "precip", dataset_id = "IMERG_monthly_global_precip", version_requested = NA_character_,
+      version_used = NA_character_, pinned = NA, file = basename(nc),
+      mb = round(file.size(nc) / 1e6, 1), seconds = round(secs))
+  }) |> bind_rows()
+}
+
+if (!file.exists(pnms_log_csv)) {
+  d_log <- map(names(pnms_box), \(g) bind_rows(
+    cm_get(g, "phy", c("thetao", "so", "bottomT", "mlotst"), "1993-01-01", END$phy, depth = T),
+    cm_get(g, "chl", "CHL", "1997-09-01", END$chl),
+    cm_get(g, "pp",  "PP",  "1997-09-01", END$pp),
+    cm_get(g, "deptho", "deptho"),
+    im_get(g))) |>
+    bind_rows()
+  write_csv(d_log, pnms_log_csv)
+}
+d_log <- read_csv(pnms_log_csv)
+kable(d_log, caption = "PNMS downloads (seconds = wall time of the request).")
+
+# version note for the rules ----
+ver_note <- function(ds) {
+  d <- d_log |> filter(.data$ds == !!ds)
+  if (all(d$pinned)) return("")
+  glue(
+    "; product version {d$version_used[1]} (current; {d$version_requested[1]} no longer served), ",
+    "not strictly comparable with the other sanctuaries")
+}
+PNMS_OC_NOTE <- ver_note("chl")
+
+d_nc <- expand_grid(d_grid, ds = names(DS)) |>
+  mutate(
+    files   = map2(grid, ds, grid_files),
+    n_files = lengths(files))
+stopifnot(all(d_nc$n_files >= 1), all(file.exists(unlist(d_nc$files))))
+```
+
+### Chumash Heritage boundary
+
+The polygon on disk for `CPNMS` is the larger "proposed action" boundary. The designated boundary is
+fetched from the ONMS GIS page and used for the masked variables if at least 99% of its area lies inside
+the area that was downloaded. `sbt_all`, `chl_all` and `precip` stay on the proposed polygon.
+
+```{r}
+#| label: chumash
+
+if (!file.exists(chnms_geo)) {
+  tmp_zip <- tempfile(fileext = ".zip")
+  tmp_dir <- tempfile()
+  download.file(CHNMS_URL, tmp_zip, quiet = T, mode = "wb")
+  unzip(tmp_zip, exdir = tmp_dir)
+  read_sf(list.files(tmp_dir, "CHNMS_py[.]shp$", full.names = T)) |>
+    st_transform(4326) |>
+    st_make_valid() |>
+    transmute(sanctuary = "Chumash Heritage (designated 2024)", nms = "CPNMS") |>
+    write_sf(chnms_geo)
+}
+ply_chnms <- read_sf(chnms_geo)
+
+# extent of the downloaded physics and ocean-colour files for CPNMS
+ext_cp <- function(ds) {
+  r <- rast(d_nc$files[[which(d_nc$grid == "CPNMS" & d_nc$ds == ds)]][1], lyrs = 1)
+  as.vector(ext(r))
+}
+bb_dl <- rbind(ext_cp("phy"), ext_cp("chl"))
+bb_dl <- c(
+  xmin = max(bb_dl[, "xmin"]), xmax = min(bb_dl[, "xmax"]),
+  ymin = max(bb_dl[, "ymin"]), ymax = min(bb_dl[, "ymax"]))
+bb_ch <- st_bbox(ply_chnms)
+
+sf_use_s2(F)
+box_dl  <- st_as_sfc(st_bbox(bb_dl, crs = 4326))
+a_ch    <- as.numeric(st_area(st_transform(ply_chnms, 3310)))
+a_ch_in <- as.numeric(st_area(st_intersection(st_transform(ply_chnms, 3310), st_transform(box_dl, 3310))))
+sf_use_s2(T)
+
+# use the designated boundary if at least 99% of its area lies in the downloaded box
+CHNMS_MIN_IN <- 0.99
+chnms_inside <- a_ch_in / a_ch >= CHNMS_MIN_IN
+
+if (chnms_inside) {
+  i <- which(ply_use$nms == "CPNMS")
+  st_geometry(ply_use)[i] <- st_geometry(st_cast(ply_chnms, "MULTIPOLYGON"))
+  ply_use$area_km2[i]     <- a_ch / 1e6
+}
+CP_NOTE <- if (chnms_inside) {
+  glue(
+    "designated boundary ({floor(100 * a_ch_in / a_ch)}% of its area; the easternmost ",
+    "{round(100 * (1 - a_ch_in / a_ch), 1)}% lies outside the downloaded box)")
+} else "proposed-action polygon"
+
+tibble(
+  boundary       = c("proposed action (data/sanctuaries.geojson)", "designated 2024 (ONMS)"),
+  area_km2       = round(c(ply_all$area_km2[ply_all$nms == "CPNMS"], a_ch / 1e6)),
+  east_edge      = round(c(st_bbox(ply_all |> filter(nms == "CPNMS"))["xmax"], bb_ch["xmax"]), 3),
+  pct_inside_box = c(100, round(100 * a_ch_in / a_ch, 1))) |>
+  kable(caption = glue(
+    "Downloaded box: {round(bb_dl['xmin'], 2)} to {round(bb_dl['xmax'], 2)} E, ",
+    "{round(bb_dl['ymin'], 2)} to {round(bb_dl['ymax'], 2)} N. Used for CPNMS: {CP_NOTE}."))
+```
+
+## Bathymetry
+
+Depths are cached per grid in two CSVs; a grid missing from a CSV is computed and appended. For the two
+large PNMS grids only the cells whose centres fall in the polygon are kept.
+
+```{r}
+#| label: bathy-fns
+
+# cells selected by a polygon (centre-in-polygon; 'small' fallback) ----
+poly_cells <- function(r, p) {
+  sort(unique(terra::extract(r, vect(p), cells = T, ID = F)$cell))
+}
+
+cell_xy <- function(r, cells) {
+  tibble(cell = cells, x = round(xFromCell(r, cells), 4), y = round(yFromCell(r, cells), 4))
+}
+
+# keep all cells, or only the polygon's cells for pnms ----
+depth_rows <- function(grid, r, depth_m) {
+  d <- tibble(grid = grid, cell = 1:ncell(r)) |>
+    mutate(x = round(xFromCell(r, cell), 4), y = round(yFromCell(r, cell), 4), depth_m = round(depth_m, 1))
+  if (startsWith(grid, "PNMS")) d <- d |> filter(cell %in% poly_cells(r, ply_all |> filter(nms == "PNMS")))
+  d |> select(-cell)
+}
+
+read_depth_csv <- function(f) {
+  if (!file.exists(f)) return(tibble(grid = character(), x = double(), y = double(), depth_m = double()))
+  read_csv(f) |> rename(any_of(c(grid = "nms")))
+}
+```
+
+```{r}
+#| label: bathy-physics
+
+# glorys12v1 static deptho, one small download per physics grid (cached) ----
+d_phy_depth <- read_depth_csv(phy_depth_csv)
+todo        <- setdiff(d_grid$grid, d_phy_depth$grid)
+if (length(todo) > 0) {
+  d_new <- map(todo, \(grid) {
+    r  <- rast(d_nc$files[[which(d_nc$grid == grid & d_nc$ds == "phy")]][1], subds = "bottomT", lyrs = 1)
+    e  <- as.vector(ext(r))
+    nc <- if (startsWith(grid, "PNMS")) {
+      file.path(dir_pnms, glue("{grid}_deptho.nc"))           # downloaded with the pnms box
+    } else file.path(dir_bathy, glue("{grid}_deptho.nc"))
+    if (!file.exists(nc)) {
+      args <- c(
+        "subset", "--dataset-id", DS_STATIC, "--variable", "deptho",
+        "--minimum-longitude", e["xmin"], "--maximum-longitude", e["xmax"],
+        "--minimum-latitude",  e["ymin"], "--maximum-latitude",  e["ymax"],
+        "--output-directory", dirname(nc), "--output-filename", basename(nc),
+        "--disable-progress-bar")
+      res <- system2(cmt_cli, args, stdout = F, stderr = F)
+      stopifnot(res == 0, file.exists(nc))
+    }
+    b <- rast(nc, subds = "deptho")
+    stopifnot(all(dim(b)[1:2] == dim(r)[1:2]), max(abs(as.vector(ext(b)) - e)) < 1e-3)
+    depth_rows(grid, b, values(b)[, 1])
+  }) |> bind_rows()
+  d_phy_depth <- bind_rows(d_phy_depth, d_new)
+  write_csv(d_phy_depth, phy_depth_csv)
+}
+```
+
+```{r}
+#| label: bathy-oc
+
+# etopo 2022 (15 arc-second) from coastwatch erddap, in 2-degree latitude bands,
+# averaged onto each 4 km grid (cached) ----
+etopo_get <- function(grid, e) {
+  y0 <- seq(e[["ymin"]], e[["ymax"]], by = 2)
+  map(y0, \(a) {
+    z  <- min(a + 2, e[["ymax"]])
+    nc <- if (length(y0) == 1) {
+      file.path(dir_bathy, glue("{grid}_etopo2022.nc"))
+    } else file.path(dir_pnms, glue("{grid}_etopo2022_{round(a, 2)}.nc"))
+    if (!file.exists(nc)) {
+      q <- glue(
+        "{ETOPO_URL}.nc?z[({a + 0.001}):1:({z - 0.001})]",
+        "[({max(e[['xmin']] + 0.001, -179.9979)}):1:({min(e[['xmax']] - 0.001, 179.9979)})]")
+      download.file(URLencode(q), nc, quiet = T, mode = "wb")
+    }
+    rast(nc)
+  }) |>
+    sprc() |>
+    merge()
+}
+
+d_oc_depth <- read_depth_csv(oc_depth_csv)
+todo       <- setdiff(d_grid$grid, d_oc_depth$grid)
+if (length(todo) > 0) {
+  d_new <- map(todo, \(grid) {
+    r <- rast(d_nc$files[[which(d_nc$grid == grid & d_nc$ds == "chl")]][1], subds = "CHL", lyrs = 1)
+    z <- etopo_get(grid, as.vector(ext(r)))
+    a <- resample(z, r, method = "average")   # mean elevation of the ~100 etopo cells in each pixel
+    depth_rows(grid, r, -values(a)[, 1])
+  }) |> bind_rows()
+  d_oc_depth <- bind_rows(d_oc_depth, d_new)
+  write_csv(d_oc_depth, oc_depth_csv)
+}
+```
+
+## Extraction
+
+Cells are chosen by centre-in-polygon (terra's default, as in `copernicus.qmd`; if no centre falls
+inside, the touched cells are used). Where files of one dataset overlap in time, the longest file wins.
+PNMS cells from both grids are pooled into one cos(latitude)-weighted mean.
+
+```{r}
+#| label: extract-fns
+
+# read one variable from all files of a dataset into a cell x month matrix (selected cells) ----
+read_var <- function(files, var, cells) {
+  rs <- map(files, \(f) rast(f, subds = var))
+  rs <- rs[order(-map_int(rs, nlyr))]                # longest file first
+  r0 <- rs[[1]][[1]]
+  walk(rs, \(r) stopifnot(
+    all(dim(r)[1:2] == dim(r0)[1:2]),
+    max(abs(as.vector(ext(r)) - as.vector(ext(r0)))) < 1e-3))
+  dates <- c(); m <- NULL
+  for (r in rs) {
+    t   <- as.Date(time(r))
+    stopifnot(length(t) == nlyr(r), !anyNA(t))
+    new <- !t %in% dates
+    if (!any(new)) next
+    m     <- cbind(m, values(r)[cells, new, drop = F])
+    dates <- c(dates, t[new])
+  }
+  dates <- as.Date(dates)
+  o     <- order(dates)
+  list(dates = dates[o], m = m[, o, drop = F])
+}
+
+# per-month (weighted) summary over the rows of x ----
+summ <- function(x, w, dates, fun = c("mean", "gmean")) {
+  fun <- match.arg(fun)
+  if (fun == "gmean") {
+    x[!is.na(x) & x <= 0] <- NA
+    x <- log10(x)
+  }
+  ok  <- !is.na(x)
+  n   <- colSums(ok)
+  x[!ok] <- 0
+  val <- colSums(x * w) / colSums(ok * w)
+  if (fun == "gmean") val <- 10^val
+  val[n == 0] <- NA
+  tibble(date = dates, value = unname(val), n_cells = unname(as.integer(n)))
+}
+
+# one grid: cell table and matrices for the cells in either polygon ----
+grid_extract <- function(grid, kind, p_use, p_all) {
+  f    <- \(ds) d_nc$files[[which(d_nc$grid == grid & d_nc$ds == ds)]]
+  vars <- if (kind == "phy") {
+    list(sst = c("phy", "thetao"), sss = c("phy", "so"), mld = c("phy", "mlotst"), sbt = c("phy", "bottomT"))
+  } else list(chl = c("chl", "CHL"), pp = c("pp", "PP"))
+  r0    <- rast(f(vars[[1]][1])[1], subds = vars[[1]][2], lyrs = 1)
+  c_use <- poly_cells(r0, p_use)
+  c_old <- poly_cells(r0, p_all)
+  c_any <- sort(union(c_use, c_old))
+  dep   <- if (kind == "phy") d_phy_depth else d_oc_depth
+  cells <- cell_xy(r0, c_any) |>
+    mutate(grid = grid, use = cell %in% c_use, old = cell %in% c_old) |>
+    left_join(dep |> filter(grid == !!grid) |> select(x, y, depth_m), by = c("x", "y"))
+  stopifnot(nrow(cells) == length(c_any))
+  m <- map(vars, \(v) read_var(f(v[1]), v[2], c_any))
+  stopifnot(length(unique(map(m, "dates"))) == 1)
+  list(cells = cells, dates = m[[1]]$dates, m = map(m, "m"), res = res(r0))
+}
+
+# pool the grids of one sanctuary ----
+pool <- function(gs) {
+  stopifnot(length(unique(map(gs, "dates"))) == 1)
+  list(
+    cells = map(gs, "cells") |> bind_rows(),
+    dates = gs[[1]]$dates,
+    m     = map(names(gs[[1]]$m), \(v) do.call(rbind, map(gs, \(g) g$m[[v]]))) |> set_names(names(gs[[1]]$m)),
+    res   = gs[[1]]$res)
+}
+```
+
+```{r}
+#| label: extract
+
+poly_lbl <- function(nms) {
+  case_when(
+    nms %in% NMS_BUF ~ "centre in polygon + 10 km buffer",
+    nms == "CPNMS"   ~ glue("centre in polygon; {CP_NOTE}"),
+    nms == "PNMS"    ~ "centre in polygon (two parts split at the antimeridian)",
+    .default         = "centre in polygon")
+}
+
+res <- map(NMS_ORD, \(nms) {
+  p_use <- ply_use |> filter(nms == !!nms)
+  p_all <- ply_all |> filter(nms == !!nms)
+  grids <- d_grid$grid[d_grid$nms == nms]
+  lbl   <- poly_lbl(nms)
+  cosw  <- nms %in% NMS_COS
+  mn    <- if (cosw) "cos(latitude)-weighted mean"           else "mean"
+  gm    <- if (cosw) "cos(latitude)-weighted geometric mean" else "geometric mean"
+  wt    <- \(y) if (cosw) cos(y * pi / 180) else rep(1, length(y))
+
+  # physics ----
+  ph   <- map(grids, \(g) grid_extract(g, "phy", p_use, p_all)) |> set_names(grids) |> pool()
+  cp   <- ph$cells
+  ok_b <- rowSums(!is.na(ph$m$sbt)) > 0              # ocean cells = cells with some data
+  i_use   <- which(cp$use)
+  i_old   <- which(cp$old)
+  i_shelf <- which(cp$use & ok_b & !is.na(cp$depth_m) & cp$depth_m <= SHELF_M)
+  n_shelf <- length(i_shelf)
+  s_ph    <- \(v, i) summ(ph$m[[v]][i, , drop = F], wt(cp$y[i]), ph$dates)
+
+  sbt <- if (n_shelf >= SHELF_MIN) {
+    s_ph("sbt", i_shelf) |> mutate(rule = glue("{lbl}; shelf cells (model depth <= {SHELF_M} m); {mn}"))
+  } else {
+    tibble(date = ph$dates, value = NA_real_, n_cells = NA_integer_, rule = "no shelf cells")
+  }
+  d_phy <- bind_rows(
+    s_ph("sst", i_use) |> mutate(var = "sst"),
+    s_ph("sss", i_use) |> mutate(var = "sss"),
+    s_ph("mld", i_use) |> mutate(var = "mld")) |>
+    mutate(rule = glue("{lbl}; {mn}")) |>
+    bind_rows(
+      sbt |> mutate(var = "sbt"),
+      s_ph("sbt", i_old) |> mutate(var = "sbt_all", rule = glue("old rule: centre in polygon, all cells; {mn}")))
+
+  # ocean colour ----
+  oc   <- map(grids, \(g) grid_extract(g, "oc", p_use, p_all)) |> set_names(grids) |> pool()
+  co   <- oc$cells
+  ok_c <- rowSums(!is.na(oc$m$chl)) > 0
+  stopifnot(!anyNA(co$depth_m[co$use]))
+  j_use  <- which(co$use)
+  j_old  <- which(co$old)
+  j_deep <- which(co$use & ok_c & co$depth_m >= OPT_M)
+  v_note <- if (nms == "PNMS") PNMS_OC_NOTE else ""
+  if (length(j_deep) >= OPT_MIN) {
+    j_sel  <- j_deep
+    rule_c <- glue("{lbl}; optically deep pixels (depth >= {OPT_M} m); {gm}{v_note}")
+  } else {
+    j_sel  <- which(co$use & ok_c)
+    rule_c <- glue("{lbl}; fewer than {OPT_MIN} optically deep pixels, all pixels used; {gm}{v_note}")
+  }
+  s_oc <- \(v, i, fun = "mean") summ(oc$m[[v]][i, , drop = F], wt(co$y[i]), oc$dates, fun)
+  d_oc <- bind_rows(
+    s_oc("chl", j_sel, "gmean") |> mutate(var = "chl", rule = rule_c),
+    s_oc("pp",  j_sel, "gmean") |> mutate(var = "pp",  rule = rule_c),
+    s_oc("chl", j_old) |> mutate(var = "chl_all", rule = glue("old rule: centre in polygon, all pixels; {mn}{v_note}")))
+
+  # cell classes, for maps and the cells table (cells of the polygon used) ----
+  cls_phy <- cp |>
+    mutate(
+      ocean = ok_b,
+      class = case_when(
+        !ocean | is.na(depth_m) ~ "land / no data",
+        depth_m <= SHELF_M      ~ "shelf (<= 200 m)",
+        .default                = "deeper than 200 m"),
+      used_sbt = row_number() %in% i_shelf & n_shelf >= SHELF_MIN) |>
+    filter(use)
+  cls_oc <- co |>
+    mutate(
+      ocean = ok_c,
+      class = case_when(
+        !ocean           ~ "land / no data",
+        depth_m >= OPT_M ~ "optically deep (>= 30 m)",
+        .default         = "optically shallow (< 30 m)"),
+      used_chl = row_number() %in% j_sel) |>
+    filter(use)
+
+  list(
+    monthly = bind_rows(d_phy, d_oc) |> mutate(nms = nms, n_cells = as.integer(n_cells), rule = as.character(rule)),
+    cls_phy = cls_phy |> mutate(nms = nms),
+    cls_oc  = cls_oc  |> mutate(nms = nms),
+    res_phy = ph$res,
+    res_oc  = oc$res,
+    n_old   = c(phy = length(i_old), oc = length(j_old)))
+}) |> set_names(NMS_ORD)
+
+# precipitation: copied from erddap.csv for the 13 ----
+d_precip <- read_csv(erddap_csv) |>
+  filter(nms %in% NMS_CM, var == "precipitation", stat == "mean") |>
+  transmute(
+    nms, date = as.Date(time), var = "precip", value, n_cells = NA_integer_,
+    rule = if_else(
+      nms == "CPNMS",
+      "copied from data/erddap.csv (IMERG, area-weighted polygon mean; proposed-action polygon)",
+      "copied from data/erddap.csv (IMERG, area-weighted polygon mean)"))
+
+# precipitation for pnms: imerg cells whose centres fall in the polygon, cos(latitude)-weighted ----
+p_pnms  <- ply_all |> filter(nms == "PNMS")
+pr_grid <- map(names(pnms_box), \(g) {
+  fs <- list.files(dir_pnms, glue("^{g}_precip_[0-9]{{4}}[.]nc$"), full.names = T)
+  r  <- rast(map(sort(fs), \(f) rast(f, subds = "precipitation")))
+  cl <- poly_cells(r[[1]], p_pnms)
+  list(dates = as.Date(time(r)), m = values(r)[cl, , drop = F], y = yFromCell(r, cl))
+})
+stopifnot(identical(pr_grid[[1]]$dates, pr_grid[[2]]$dates))
+d_precip_pnms <- summ(
+  do.call(rbind, map(pr_grid, "m")), cos(unlist(map(pr_grid, "y")) * pi / 180), pr_grid[[1]]$dates) |>
+  mutate(
+    nms = "PNMS", var = "precip",
+    rule = "IMERG monthly (USF ERDDAP), centre in polygon (two parts split at the antimeridian); cos(latitude)-weighted mean")
+
+d_state <- map(res, "monthly") |>
+  bind_rows() |>
+  bind_rows(d_precip, d_precip_pnms) |>
+  mutate(
+    nms = factor(nms, NMS_ORD),
+    var = factor(var, VARS_OUT)) |>
+  arrange(nms, var, date) |>
+  mutate(nms = as.character(nms), var = as.character(var)) |>
+  select(nms, date, var, value, n_cells, rule)
+stopifnot(!anyDuplicated(d_state[, c("nms", "date", "var")]))
+```
+
+## Cells and rules
+
+`physics` = model cells used for `sst`, `sss`, `mld`; `shelf` = those with model depth <= 200 m (used for
+`sbt`); `pixels` = ocean-colour pixels in the polygon; `deep` = pixels with ETOPO depth >= 30 m (used for
+`chl` and `pp`). `old` = cells or pixels under the old, unbuffered rule.
+
+```{r}
+#| label: cells
+
+d_cls_phy <- map(res, "cls_phy") |> bind_rows()
+d_cls_oc  <- map(res, "cls_oc")  |> bind_rows()
+
+tbl_n <- tibble(nms = NMS_ORD) |>
+  left_join(ply_use |> st_drop_geometry() |> select(nms, area_km2), by = "nms") |>
+  left_join(
+    d_cls_phy |> group_by(nms) |> summarize(
+      physics = sum(ocean), shelf = sum(class == "shelf (<= 200 m)"),
+      depth_phy = glue("{round(min(depth_m[ocean], na.rm = T))}-{round(max(depth_m[ocean], na.rm = T))}")),
+    by = "nms") |>
+  left_join(
+    d_cls_oc |> group_by(nms) |> summarize(
+      pixels = sum(ocean), deep = sum(class == "optically deep (>= 30 m)"),
+      depth_oc = glue("{round(min(depth_m[ocean]))}-{round(max(depth_m[ocean]))}")),
+    by = "nms") |>
+  mutate(
+    old_phy = map_int(nms, \(n) res[[n]]$n_old[["phy"]]),
+    old_oc  = map_int(nms, \(n) res[[n]]$n_old[["oc"]]),
+    sbt_rule = if_else(shelf >= SHELF_MIN, "shelf mean", "NA (no shelf cells)"),
+    chl_rule = if_else(deep >= OPT_MIN, "deep pixels", "all pixels"),
+    area_km2 = round(area_km2))
+
+tbl_n |>
+  select(nms, area_km2, old_phy, physics, shelf, depth_phy, sbt_rule, old_oc, pixels, deep, depth_oc, chl_rule) |>
+  kable(caption = "Cells per sanctuary. Depth ranges (m) are over the ocean cells or pixels in the polygon used.")
+
+# state_cells.csv: per sanctuary x var ----
+dep_rng <- bind_rows(
+  d_cls_phy |> filter(ocean) |> group_by(nms) |>
+    summarize(var = list(c("sst", "sss", "mld")), dmin = min(depth_m, na.rm = T), dmax = max(depth_m, na.rm = T)),
+  d_cls_phy |> filter(used_sbt) |> group_by(nms) |>
+    summarize(var = list("sbt"), dmin = min(depth_m), dmax = max(depth_m)),
+  d_cls_oc |> filter(used_chl) |> group_by(nms) |>
+    summarize(var = list(c("chl", "pp")), dmin = min(depth_m), dmax = max(depth_m))) |>
+  unnest(var)
+
+d_cells <- d_state |>
+  filter(var != "precip") |>
+  group_by(nms, var) |>
+  summarize(
+    n_cells_median = median(n_cells, na.rm = T),
+    n_cells_min    = suppressWarnings(min(n_cells, na.rm = T)),
+    n_cells_max    = suppressWarnings(max(n_cells, na.rm = T)),
+    rule           = first(rule),
+    .groups = "drop") |>
+  mutate(across(starts_with("n_cells"), \(x) if_else(is.finite(x), x, NA_real_))) |>
+  left_join(dep_rng, by = c("nms", "var")) |>
+  rename(depth_min_m = dmin, depth_max_m = dmax) |>
+  left_join(ply_use |> st_drop_geometry() |> select(nms, area_use = area_km2), by = "nms") |>
+  left_join(ply_all |> st_drop_geometry() |> select(nms, area_old = area_km2), by = "nms") |>
+  mutate(area_km2 = if_else(var %in% c("sbt_all", "chl_all"), area_old, area_use)) |>
+  select(-area_use, -area_old) |>
+  mutate(
+    nms = factor(nms, NMS_ORD), var = factor(var, VARS_OUT),
+    across(c(depth_min_m, depth_max_m, area_km2), \(x) round(x, 1))) |>
+  arrange(nms, var) |>
+  mutate(across(c(nms, var), as.character))
+stopifnot(nrow(d_cells) == length(NMS_ORD) * (length(VARS_OUT) - 1))
+```
+
+### Maps of cells used
+
+PNMS is drawn in 0-360 longitude so that its two parts sit side by side.
+
+```{r}
+#| label: maps-phy
+#| fig-height: 11
+#| fig-width: 11
+
+map_one <- function(nms, d, r_res, cols) {
+  # one legend for the panel: only the first map keeps it
+  leg <- if (nms == NMS_ORD[1]) "bottom" else "none"
+  p <- ply_use |> filter(nms == !!nms)
+  d <- d |> filter(nms == !!nms)
+  if (nms == "PNMS") {
+    p <- st_shift_longitude(p)
+    d <- d |> mutate(x = if_else(x < 0, x + 360, x))
+  }
+  ggplot() +
+    geom_tile(data = d, aes(x, y, fill = class), width = r_res[1], height = r_res[2],
+              color = if (nrow(d) > 2000) NA else "white", linewidth = 0.1) +
+    geom_sf(data = p, fill = NA, color = PAL$ink, linewidth = 0.3) +
+    scale_fill_manual(values = cols, limits = names(cols), drop = F) +
+    labs(title = nms, x = NULL, y = NULL, fill = NULL) +
+    theme_chk(8) +
+    theme(axis.text = element_blank(), panel.grid.major = element_blank(), legend.position = leg)
+}
+
+COL_PHY <- c("shelf (<= 200 m)" = PAL$orange, "deeper than 200 m" = PAL$blue, "land / no data" = PAL$axis)
+d_cls_phy$class <- factor(d_cls_phy$class, names(COL_PHY))
+p_phy <- map(NMS_ORD, \(n) map_one(n, d_cls_phy, res[[n]]$res_phy, COL_PHY)) |>
+  wrap_plots(ncol = 5) +
+  plot_annotation(
+    title    = "Physics cells in each polygon: shelf cells (orange) are used for bottom temperature",
+    subtitle = "GLORYS12V1 1/12 deg grid; MNMS, GRNMS, FGBNMS polygons buffered by 10 km",
+    theme    = theme_chk())
+save_fig(p_phy, "cells_physics.png", width = 11, height = 11)
+```
+
+```{r}
+#| label: maps-oc
+#| fig-height: 11
+#| fig-width: 11
+
+COL_OC <- c(
+  "optically deep (>= 30 m)" = PAL$blue, "optically shallow (< 30 m)" = PAL$orange, "land / no data" = PAL$axis)
+d_cls_oc$class <- factor(d_cls_oc$class, names(COL_OC))
+p_oc <- map(NMS_ORD, \(n) map_one(n, d_cls_oc, res[[n]]$res_oc, COL_OC)) |>
+  wrap_plots(ncol = 5) +
+  plot_annotation(
+    title    = "Ocean-colour pixels in each polygon: optically deep pixels (blue) are used for chlorophyll",
+    subtitle = "GlobColour 4 km grid; depth = ETOPO 2022 averaged onto each pixel",
+    theme    = theme_chk())
+save_fig(p_oc, "cells_oceancolour.png", width = 11, height = 11)
+```
+
+## Masked versus old definitions
+
+Anomalies are departures from the 2003-2012 monthly climatology; chlorophyll is compared on log10.
+`change` = mean 2016-2025 minus mean 2003-2012 (degC for `sbt`, log10 mg m-3 for `chl`).
+`mean_diff` = masked minus old, in raw units.
+
+```{r}
+#| label: compare
+
+anom <- function(d) {
+  d |>
+    mutate(m = as.integer(format(date, "%m"))) |>
+    group_by(m) |>
+    mutate(anom = value - mean(value[date >= as.Date("2003-01-01") & date <= as.Date("2012-12-01")])) |>
+    ungroup()
+}
+change <- function(date, value) {
+  mean(value[date >= as.Date("2016-01-01") & date <= as.Date("2025-12-01")]) -
+    mean(value[date >= as.Date("2003-01-01") & date <= as.Date("2012-12-01")])
+}
+
+d_compare <- map(
+  list(c("sbt", "sbt_all", "identity", "degC"), c("chl", "chl_all", "log10", "log10 mg m-3")), \(pr) {
+    tr <- match.fun(pr[3])
+    d_state |>
+      filter(var %in% pr[1:2]) |>
+      select(nms, date, var, value) |>
+      pivot_wider(names_from = var, values_from = value) |>
+      rename(masked = !!pr[1], old = !!pr[2]) |>
+      filter(!is.na(masked), !is.na(old)) |>
+      group_by(nms) |>
+      group_modify(\(d, k) {
+        a_m <- anom(d |> transmute(date, value = tr(masked)))$anom
+        a_o <- anom(d |> transmute(date, value = tr(old)))$anom
+        tibble(
+          cor_anom      = cor(a_m, a_o),
+          mean_diff     = mean(d$masked - d$old),
+          change_masked = change(d$date, tr(d$masked)),
+          change_old    = change(d$date, tr(d$old)))
+      }) |>
+      ungroup() |>
+      mutate(pair = glue("{pr[1]} vs {pr[2]}"), units_change = pr[4], .after = nms)
+  }) |>
+  bind_rows() |>
+  right_join(expand_grid(nms = NMS_ORD, pair = c("sbt vs sbt_all", "chl vs chl_all")), by = c("nms", "pair")) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(pair != "sbt vs sbt_all", nms) |>
+  mutate(
+    nms          = as.character(nms),
+    pair         = as.character(pair),
+    units_change = coalesce(units_change, if_else(pair == "sbt vs sbt_all", "degC", "log10 mg m-3")))
+
+d_compare |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  kable(caption = "Masked versus old definitions (NA: no shelf cells, so no masked sbt).")
+```
+
+## Write
+
+```{r}
+#| label: verify-old
+
+# reproduce data/copernicus.csv with the old rule before writing anything ----
+# sst is compared only where the polygon is unchanged (not buffered, not the designated chnms)
+NMS_CHG <- c(NMS_BUF, if (chnms_inside) "CPNMS")
+d_old <- read_csv(copernicus_csv) |>
+  filter(
+    nms %in% NMS_CM, stat == "mean",
+    str_detect(dataset, "_my_"),                          # drop myint duplicates
+    str_remove(var, "_depth=.*$") %in% c("bottomT", "CHL", "thetao")) |>
+  transmute(
+    nms, date = as.Date(time),
+    var = recode(str_remove(var, "_depth=.*$"), bottomT = "sbt_all", CHL = "chl_all", thetao = "sst"),
+    value_old = value) |>
+  distinct(nms, date, var, .keep_all = T)
+
+d_agree <- d_state |>
+  inner_join(d_old, by = c("nms", "date", "var")) |>
+  filter(var != "sst" | !nms %in% NMS_CHG) |>
+  group_by(var, nms) |>
+  summarize(n = n(), max_abs_diff = max(abs(value - value_old)), .groups = "drop")
+
+d_agree |>
+  pivot_wider(id_cols = nms, names_from = var, values_from = max_abs_diff) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(digits = 9, caption = "Maximum absolute difference from data/copernicus.csv (old rule).")
+
+stopifnot(
+  all(d_agree$max_abs_diff < TOL),
+  setequal(d_agree$nms[d_agree$var == "sbt_all"], NMS_CM),
+  setequal(d_agree$nms[d_agree$var == "chl_all"], NMS_CM),
+  setequal(d_agree$nms[d_agree$var == "sst"], setdiff(NMS_CM, NMS_CHG)))
+```
+
+```{r}
+#| label: write
+
+write_csv(d_state,   monthly_csv, na = "NA")
+write_csv(d_cells,   cells_csv,   na = "NA")
+write_csv(d_compare, compare_csv, na = "NA")
+```
+
+## Checks
+
+```{r}
+#| label: checks
+
+chk_m <- read_csv(monthly_csv, col_types = cols(date = col_date(), n_cells = col_integer(), .default = col_guess()))
+chk_c <- read_csv(cells_csv)
+chk_k <- read_csv(compare_csv)
+
+rng <- chk_m |>
+  group_by(var) |>
+  summarize(
+    first = min(date), last = max(date), n_months = n_distinct(date),
+    n_nms = n_distinct(nms), n_rows = n(), n_na = sum(is.na(value)))
+kable(rng, caption = "state_monthly.csv by variable")
+
+n_na_sbt <- sum(tbl_n$shelf < SHELF_MIN)
+stopifnot(
+  identical(names(chk_m), c("nms", "date", "var", "value", "n_cells", "rule")),
+  setequal(unique(chk_m$var), VARS_OUT),
+  setequal(unique(chk_m$nms), NMS_ORD),
+  length(NMS_ORD) == 14,
+  !anyDuplicated(chk_m[, c("nms", "date", "var")]),
+  all(format(chk_m$date, "%d") == "01"),
+  # one row per sanctuary x month for every var
+  all(rng$n_rows == rng$n_months * length(NMS_ORD)),
+  rng$first[rng$var == "sst"]    == as.Date("1993-01-01"),
+  rng$first[rng$var == "chl"]    == as.Date("1997-09-01"),
+  rng$first[rng$var == "precip"] == as.Date("1998-01-01"),
+  rng$last[rng$var == "precip"]  == as.Date("2025-09-01"),
+  # NA only where sbt has no shelf cells
+  sum(is.na(chk_m$value)) == n_na_sbt * rng$n_months[rng$var == "sbt"],
+  all(is.na(chk_m$n_cells[chk_m$var == "precip" & chk_m$nms %in% NMS_CM])),
+  all(chk_m$n_cells[chk_m$var == "precip" & chk_m$nms == "PNMS"] >= 1),
+  all(chk_m$n_cells[chk_m$var != "precip" & !is.na(chk_m$value)] >= 1),
+  identical(names(chk_c), c(
+    "nms", "var", "n_cells_median", "n_cells_min", "n_cells_max", "rule",
+    "depth_min_m", "depth_max_m", "area_km2")),
+  nrow(chk_c) == length(NMS_ORD) * 8,
+  identical(names(chk_k), c(
+    "nms", "pair", "units_change", "cor_anom", "mean_diff", "change_masked", "change_old")),
+  nrow(chk_k) == length(NMS_ORD) * 2)
+```
+
+All checks passed: `r nrow(chk_m)` rows in `state_monthly.csv` (`r length(NMS_ORD)` sanctuaries),
+`r nrow(chk_c)` in `state_cells.csv`, `r nrow(chk_k)` in `state_compare.csv`.

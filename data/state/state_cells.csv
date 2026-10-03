@@ -1,0 +1,113 @@
+nms,var,n_cells_median,n_cells_min,n_cells_max,rule,depth_min_m,depth_max_m,area_km2
+OCNMS,sst,139,139,139,centre in polygon; mean,9.3,1059.3,8237.6
+OCNMS,sbt,116,116,116,centre in polygon; shelf cells (model depth <= 200 m); mean,9.3,197.2,8237.6
+OCNMS,sss,139,139,139,centre in polygon; mean,9.3,1059.3,8237.6
+OCNMS,mld,139,139,139,centre in polygon; mean,9.3,1059.3,8237.6
+OCNMS,chl,497,344,497,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.2,1283.5,8237.6
+OCNMS,pp,497,57,497,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.2,1283.5,8237.6
+OCNMS,sbt_all,139,139,139,"old rule: centre in polygon, all cells; mean",NA,NA,8237.6
+OCNMS,chl_all,571,416,571,"old rule: centre in polygon, all pixels; mean",NA,NA,8237.6
+GFNMS,sst,132,132,132,centre in polygon; mean,23,3280,8534.7
+GFNMS,sbt,70,70,70,centre in polygon; shelf cells (model depth <= 200 m); mean,23,194.7,8534.7
+GFNMS,sss,132,132,132,centre in polygon; mean,23,3280,8534.7
+GFNMS,mld,132,132,132,centre in polygon; mean,23,3280,8534.7
+GFNMS,chl,484,466,484,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.3,3302.3,8534.7
+GFNMS,pp,484,484,484,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.3,3302.3,8534.7
+GFNMS,sbt_all,132,132,132,"old rule: centre in polygon, all cells; mean",NA,NA,8534.7
+GFNMS,chl_all,506,488,506,"old rule: centre in polygon, all pixels; mean",NA,NA,8534.7
+CBNMS,sst,47,47,47,centre in polygon; mean,88.7,3504.9,3330
+CBNMS,sbt,14,14,14,centre in polygon; shelf cells (model depth <= 200 m); mean,88.7,161.2,3330
+CBNMS,sss,47,47,47,centre in polygon; mean,88.7,3504.9,3330
+CBNMS,mld,47,47,47,centre in polygon; mean,88.7,3504.9,3330
+CBNMS,chl,198,178,198,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,71.1,3540.4,3330
+CBNMS,pp,198,198,198,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,71.1,3540.4,3330
+CBNMS,sbt_all,47,47,47,"old rule: centre in polygon, all cells; mean",NA,NA,3330
+CBNMS,chl_all,198,178,198,"old rule: centre in polygon, all pixels; mean",NA,NA,3330
+MBNMS,sst,231,231,231,centre in polygon; mean,16.4,3812.9,15789.5
+MBNMS,sbt,62,62,62,centre in polygon; shelf cells (model depth <= 200 m); mean,16.4,169.7,15789.5
+MBNMS,sss,231,231,231,centre in polygon; mean,16.4,3812.9,15789.5
+MBNMS,mld,231,231,231,centre in polygon; mean,16.4,3812.9,15789.5
+MBNMS,chl,878,815,878,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.1,3815.8,15789.5
+MBNMS,pp,877,877,877,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.1,3815.8,15789.5
+MBNMS,sbt_all,231,231,231,"old rule: centre in polygon, all cells; mean",NA,NA,15789.5
+MBNMS,chl_all,917,853,918,"old rule: centre in polygon, all pixels; mean",NA,NA,15789.5
+CPNMS,sst,166,166,166,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); mean,25.9,3273.8,11766.4
+CPNMS,sbt,25,25,25,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); shelf cells (model depth <= 200 m); mean,25.9,162.4,11766.4
+CPNMS,sss,166,166,166,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); mean,25.9,3273.8,11766.4
+CPNMS,mld,166,166,166,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); mean,25.9,3273.8,11766.4
+CPNMS,chl,631,457,631,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); optically deep pixels (depth >= 30 m); geometric mean,30.6,3461.9,11766.4
+CPNMS,pp,631,631,631,centre in polygon; designated boundary (99% of its area; the easternmost 0.9% lies outside the downloaded box); optically deep pixels (depth >= 30 m); geometric mean,30.6,3461.9,11766.4
+CPNMS,sbt_all,279,279,279,"old rule: centre in polygon, all cells; mean",NA,NA,19618.2
+CPNMS,chl_all,1104,828,1104,"old rule: centre in polygon, all pixels; mean",NA,NA,19618.2
+CINMS,sst,50,50,50,centre in polygon; mean,31,1166.2,3805.2
+CINMS,sbt,26,26,26,centre in polygon; shelf cells (model depth <= 200 m); mean,31,169.8,3805.2
+CINMS,sss,50,50,50,centre in polygon; mean,31,1166.2,3805.2
+CINMS,mld,50,50,50,centre in polygon; mean,31,1166.2,3805.2
+CINMS,chl,188,188,188,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,31,1094.1,3805.2
+CINMS,pp,188,188,188,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,31,1094.1,3805.2
+CINMS,sbt_all,50,50,50,"old rule: centre in polygon, all cells; mean",NA,NA,3805.2
+CINMS,chl_all,211,211,212,"old rule: centre in polygon, all pixels; mean",NA,NA,3805.2
+PNMS,sst,19499,19499,19499,centre in polygon (two parts split at the antimeridian); cos(latitude)-weighted mean,7,5921.5,1511736.1
+PNMS,sbt,152,152,152,centre in polygon (two parts split at the antimeridian); shelf cells (model depth <= 200 m); cos(latitude)-weighted mean,7,199.1,1511736.1
+PNMS,sss,19499,19499,19499,centre in polygon (two parts split at the antimeridian); cos(latitude)-weighted mean,7,5921.5,1511736.1
+PNMS,mld,19499,19499,19499,centre in polygon (two parts split at the antimeridian); cos(latitude)-weighted mean,7,5921.5,1511736.1
+PNMS,chl,78225,75730,78225,"centre in polygon (two parts split at the antimeridian); optically deep pixels (depth >= 30 m); cos(latitude)-weighted geometric mean; product version 202603 (current; 202411 no longer served), not strictly comparable with the other sanctuaries",30,5846.4,1511736.1
+PNMS,pp,78225,78225,78225,"centre in polygon (two parts split at the antimeridian); optically deep pixels (depth >= 30 m); cos(latitude)-weighted geometric mean; product version 202603 (current; 202411 no longer served), not strictly comparable with the other sanctuaries",30,5846.4,1511736.1
+PNMS,sbt_all,19499,19499,19499,"old rule: centre in polygon, all cells; cos(latitude)-weighted mean",NA,NA,1511736.1
+PNMS,chl_all,78438,75926,78438,"old rule: centre in polygon, all pixels; cos(latitude)-weighted mean; product version 202603 (current; 202411 no longer served), not strictly comparable with the other sanctuaries",NA,NA,1511736.1
+HIHWNMS,sst,48,48,48,centre in polygon; mean,43.7,651,3547
+HIHWNMS,sbt,39,39,39,centre in polygon; shelf cells (model depth <= 200 m); mean,43.7,181,3547
+HIHWNMS,sss,48,48,48,centre in polygon; mean,43.7,651,3547
+HIHWNMS,mld,48,48,48,centre in polygon; mean,43.7,651,3547
+HIHWNMS,chl,147,145,147,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,31.5,347.5,3547
+HIHWNMS,pp,146,146,146,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,31.5,347.5,3547
+HIHWNMS,sbt_all,48,48,48,"old rule: centre in polygon, all cells; mean",NA,NA,3547
+HIHWNMS,chl_all,170,168,170,"old rule: centre in polygon, all pixels; mean",NA,NA,3547
+NMSAS,sst,424,424,424,centre in polygon; mean,794.5,5657,35251.8
+NMSAS,sbt,NA,NA,NA,no shelf cells,NA,NA,35251.8
+NMSAS,sss,424,424,424,centre in polygon; mean,794.5,5657,35251.8
+NMSAS,mld,424,424,424,centre in polygon; mean,794.5,5657,35251.8
+NMSAS,chl,1655,1021,1655,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,102.7,5625.3,35251.8
+NMSAS,pp,1655,1648,1655,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,102.7,5625.3,35251.8
+NMSAS,sbt_all,424,424,424,"old rule: centre in polygon, all cells; mean",NA,NA,35251.8
+NMSAS,chl_all,1655,1021,1655,"old rule: centre in polygon, all pixels; mean",NA,NA,35251.8
+FGBNMS,sst,92,92,92,centre in polygon + 10 km buffer; mean,50.9,315.9,6708.3
+FGBNMS,sbt,78,78,78,centre in polygon + 10 km buffer; shelf cells (model depth <= 200 m); mean,50.9,198.9,6708.3
+FGBNMS,sss,92,92,92,centre in polygon + 10 km buffer; mean,50.9,315.9,6708.3
+FGBNMS,mld,92,92,92,centre in polygon + 10 km buffer; mean,50.9,315.9,6708.3
+FGBNMS,chl,356,341,356,centre in polygon + 10 km buffer; optically deep pixels (depth >= 30 m); geometric mean,51,353.1,6708.3
+FGBNMS,pp,356,356,356,centre in polygon + 10 km buffer; optically deep pixels (depth >= 30 m); geometric mean,51,353.1,6708.3
+FGBNMS,sbt_all,4,4,4,"old rule: centre in polygon, all cells; mean",NA,NA,416.2
+FGBNMS,chl_all,22,21,22,"old rule: centre in polygon, all pixels; mean",NA,NA,416.2
+FKNMS,sst,132,132,132,centre in polygon; mean,7,383.1,9875.4
+FKNMS,sbt,131,131,131,centre in polygon; shelf cells (model depth <= 200 m); mean,7,117.9,9875.4
+FKNMS,sss,132,132,132,centre in polygon; mean,7,383.1,9875.4
+FKNMS,mld,132,132,132,centre in polygon; mean,7,383.1,9875.4
+FKNMS,chl,98,97,98,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.1,518.9,9875.4
+FKNMS,pp,98,98,98,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.1,518.9,9875.4
+FKNMS,sbt_all,132,132,132,"old rule: centre in polygon, all cells; mean",NA,NA,9875.4
+FKNMS,chl_all,507,495,507,"old rule: centre in polygon, all pixels; mean",NA,NA,9875.4
+GRNMS,sst,10,10,10,centre in polygon + 10 km buffer; mean,13,20.6,686.3
+GRNMS,sbt,10,10,10,centre in polygon + 10 km buffer; shelf cells (model depth <= 200 m); mean,13,20.6,686.3
+GRNMS,sss,10,10,10,centre in polygon + 10 km buffer; mean,13,20.6,686.3
+GRNMS,mld,10,10,10,centre in polygon + 10 km buffer; mean,13,20.6,686.3
+GRNMS,chl,30,30,30,"centre in polygon + 10 km buffer; fewer than 10 optically deep pixels, all pixels used; geometric mean",14.9,22.1,686.3
+GRNMS,pp,30,30,30,"centre in polygon + 10 km buffer; fewer than 10 optically deep pixels, all pixels used; geometric mean",14.9,22.1,686.3
+GRNMS,sbt_all,2,2,2,"old rule: centre in polygon, all cells; mean",NA,NA,57.3
+GRNMS,chl_all,2,2,2,"old rule: centre in polygon, all pixels; mean",NA,NA,57.3
+MNMS,sst,5,5,5,centre in polygon + 10 km buffer; mean,32.2,145.8,374.2
+MNMS,sbt,5,5,5,centre in polygon + 10 km buffer; shelf cells (model depth <= 200 m); mean,32.2,145.8,374.2
+MNMS,sss,5,5,5,centre in polygon + 10 km buffer; mean,32.2,145.8,374.2
+MNMS,mld,5,5,5,centre in polygon + 10 km buffer; mean,32.2,145.8,374.2
+MNMS,chl,17,17,17,centre in polygon + 10 km buffer; optically deep pixels (depth >= 30 m); geometric mean,40.1,150.6,374.2
+MNMS,pp,17,17,17,centre in polygon + 10 km buffer; optically deep pixels (depth >= 30 m); geometric mean,40.1,150.6,374.2
+MNMS,sbt_all,1,1,1,"old rule: centre in polygon, all cells; mean",NA,NA,2.2
+MNMS,chl_all,3,3,3,"old rule: centre in polygon, all pixels; mean",NA,NA,2.2
+SBNMS,sst,34,34,34,centre in polygon; mean,32.3,108.8,2188.9
+SBNMS,sbt,34,34,34,centre in polygon; shelf cells (model depth <= 200 m); mean,32.3,108.8,2188.9
+SBNMS,sss,34,34,34,centre in polygon; mean,32.3,108.8,2188.9
+SBNMS,mld,34,34,34,centre in polygon; mean,32.3,108.8,2188.9
+SBNMS,chl,134,134,134,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.5,135.5,2188.9
+SBNMS,pp,134,134,134,centre in polygon; optically deep pixels (depth >= 30 m); geometric mean,30.5,135.5,2188.9
+SBNMS,sbt_all,34,34,34,"old rule: centre in polygon, all cells; mean",NA,NA,2188.9
+SBNMS,chl_all,137,137,137,"old rule: centre in polygon, all pixels; mean",NA,NA,2188.9
