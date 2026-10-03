@@ -1,0 +1,1595 @@
+---
+title: "Environmental trajectories of 13 National Marine Sanctuaries"
+subtitle: "Departure from each sanctuary's 2003-2012 baseline, red-noise null, status and form, temporal eigenfunctions, common state space, events, climate modes and sensitivity"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: false
+editor_options:
+  chunk_output_type: console
+---
+
+This notebook computes every number the trajectories manuscript reports and writes tidy CSVs to
+`data/trajectories/`. Manuscript figures are drawn elsewhere from those CSVs; plots here are
+diagnostics only (`figures/trajectories/diag_*.png`). Slow steps are cached to CSV and recomputed
+whenever an input file is newer than its cache. Optional inputs (marine-heatwave days, climate
+indices, OC-CCI chlorophyll) are used when present; their sections say so when they are skipped.
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  adespatial, dplyr, ecp, ggplot2, glue, here, knitr, lubridate, parallel,
+  patchwork, purrr, readr, scales, stringr, tibble, tidyr, vegan, zoo,
+  quiet = T)
+options(readr.show_col_types = F, dplyr.summarise.inform = F)
+set.seed(42)
+t_start <- Sys.time()
+
+# paths ----
+state_csv   <- here("data/state/state_monthly.csv")
+events_csv  <- here("data/events/events_catalog.csv")
+mhw_csv     <- here("data/events/mhw_monthly.csv")
+indices_csv <- here("data/context/indices_monthly.csv")
+occci_csv   <- here("data/context/chl_occci_monthly.csv")
+dir_out     <- here("data/trajectories")
+dir_fig     <- here("figures/trajectories")
+dir.create(dir_out, showWarnings = F, recursive = T)
+dir.create(dir_fig, showWarnings = F, recursive = T)
+out <- \(f) file.path(dir_out, f)
+
+# constants ----
+VARS      <- c("sst", "sbt", "sss", "mld", "chl", "precip")
+LOG_VARS  <- c("chl", "mld", "pp", "chl_all", "chl_occci")
+NMS_LUT   <- tribble(
+  ~nms,      ~name,                             ~region,
+  "OCNMS",   "Olympic Coast",                   "West Coast",
+  "GFNMS",   "Greater Farallones",              "West Coast",
+  "CBNMS",   "Cordell Bank",                    "West Coast",
+  "MBNMS",   "Monterey Bay",                    "West Coast",
+  "CPNMS",   "Chumash Heritage",                "West Coast",
+  "CINMS",   "Channel Islands",                 "West Coast",
+  "PNMS",    "Papahānaumokuākea",               "Pacific Islands",
+  "HIHWNMS", "Hawaiian Islands Humpback Whale", "Pacific Islands",
+  "NMSAS",   "American Samoa",                  "Pacific Islands",
+  "FGBNMS",  "Flower Garden Banks",             "Southeast and Gulf",
+  "FKNMS",   "Florida Keys",                    "Southeast and Gulf",
+  "GRNMS",   "Gray's Reef",                     "Southeast and Gulf",
+  "MNMS",    "Monitor",                         "Northeast",
+  "SBNMS",   "Stellwagen Bank",                 "Northeast")
+NMS_ALL   <- NMS_LUT$nms   # design order; NMS_ORD (set in the data chunk) = those present in the state file
+BASIN     <- set_names(
+  if_else(NMS_ALL %in% c("FGBNMS", "FKNMS", "GRNMS", "MNMS", "SBNMS"), "atlantic", "pacific"), NMS_ALL)
+WIN_BEG   <- as_date("2003-01-01")
+WIN_END   <- as_date("2025-09-01")
+BASE_BEG  <- as_date("2003-01-01")
+BASE_END  <- as_date("2012-12-01")
+TEMP_BEG  <- as_date("1993-01-01")
+WIN_DATES <- seq(WIN_BEG, WIN_END, by = "month")
+N_WIN     <- length(WIN_DATES)
+YR_WIN    <- year(WIN_DATES)
+YEARS     <- sort(unique(YR_WIN))
+IS_BASE   <- WIN_DATES >= BASE_BEG & WIN_DATES <= BASE_END
+PERIODS   <- tribble(
+  ~period,     ~y0,  ~y1,
+  "base",      2003, 2012,
+  "2013-2015", 2013, 2015,
+  "2016-2020", 2016, 2020,
+  "2021-2025", 2021, 2025,
+  "post",      2013, 2025)
+PERIODS_VAR <- bind_rows(PERIODS, tibble(period = "2016-2025", y0 = 2016, y1 = 2025))
+in_period <- \(yr, p) { r <- PERIODS_VAR[PERIODS_VAR$period == p, ]; yr >= r$y0 & yr <= r$y1 }
+PER_MASK  <- map(set_names(PERIODS_VAR$period), \(p) in_period(YR_WIN, p))
+SD_FLOOR  <- 0.5
+SIGMA_THR <- 2
+N_SUR     <- 999          # red-noise null series per sanctuary
+N_EV_SUR  <- 999          # circular shifts for the event coincidence test
+N_MODE_SUR <- 499         # phase-randomized surrogates per climate index
+N_AEM_NULL <- 39          # red-noise series per sanctuary for the eigenfunction reference (spec: 99; cut for run time)
+NPERM_AEM  <- 999
+NPERM_AEM_NULL <- 199
+MAX_NA    <- 0.1          # a variable with more missing months than this (window or baseline) is dropped
+N_CORE    <- max(1, detectCores() - 2)
+BANDS     <- c("sub-annual", "interannual", "decadal", "trend-like")
+INDICES   <- c("oni", "pdo", "npgo", "nao", "amo")   # natl_sst, nino34 etc. in the file are not used
+LAGS      <- 0:6
+# climate indices assigned a priori by basin
+MODE_SETS <- list(pacific = c("oni", "pdo", "npgo"), atlantic = c("oni", "nao", "amo"))
+SEASONS   <- c("DJF", "MAM", "JJA", "SON")
+seed_of <- \(nms_i, offset = 0) 42 + 1000 * match(nms_i, NMS_ALL) + offset
+
+# a cache is fresh when it exists and is newer than every input that is present ----
+is_fresh <- function(f, inputs = state_csv) {
+  inputs <- inputs[file.exists(inputs)]
+  all(file.exists(f)) && all(outer(file.mtime(f), file.mtime(inputs), ">"))
+}
+note <- \(...) cat(glue("NOTE: ", ..., .envir = parent.frame()), "\n")
+
+# plot theme (from trajectory_checks.qmd) ----
+PAL <- list(
+  surface = "#fcfcfb", ink = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", blue = "#2a78d6", orange = "#eb6834")
+PAL_DIV  <- c("#104281", "#2a78d6", "#9ec5f4", "#f0efec", "#f3b3ad", "#e34948", "#8f1d1c")
+PAL_BAND <- c("#86b6ef", "#3987e5", "#1c5cab", "#0d366b")   # ordinal, short -> long time scale
+
+theme_chk <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background    = element_rect(fill = PAL$surface, color = NA),
+      panel.background   = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major   = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = PAL$muted),
+      axis.title         = element_text(color = PAL$ink2),
+      plot.title         = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle      = element_text(color = PAL$ink2),
+      plot.caption       = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position = "plot",
+      strip.text         = element_text(color = PAL$ink, face = "bold", hjust = 0),
+      legend.position    = "top",
+      legend.justification = "left",
+      legend.title       = element_text(color = PAL$ink2),
+      legend.text        = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 200, bg = PAL$surface)
+  p
+}
+```
+
+## Data
+
+```{r}
+#| label: data
+
+d_state <- read_csv(state_csv) |>
+  mutate(date = as_date(date)) |>
+  filter(nms %in% NMS_ALL)
+NMS_ORD <- intersect(NMS_ALL, unique(d_state$nms))
+NMS_LUT <- NMS_LUT |> filter(nms %in% NMS_ORD)
+if (length(setdiff(NMS_ALL, NMS_ORD)) > 0)
+  note("sanctuaries absent from the state file, not analyzed: {paste(setdiff(NMS_ALL, NMS_ORD), collapse = ', ')}")
+stopifnot(
+  all(c("nms", "date", "var", "value") %in% names(d_state)),
+  all(VARS %in% d_state$var),
+  !anyDuplicated(d_state[, c("nms", "date", "var")]))
+is_provisional <- "rule" %in% names(d_state) && any(str_detect(coalesce(d_state$rule, ""), "provisional"))
+
+inputs <- tibble(
+  input = c("state_monthly", "events_catalog", "mhw_monthly", "indices_monthly", "chl_occci_monthly"),
+  path  = c(state_csv, events_csv, mhw_csv, indices_csv, occci_csv)) |>
+  mutate(
+    present  = file.exists(path),
+    modified = if_else(present, format(file.mtime(path), "%Y-%m-%d %H:%M"), NA_character_),
+    note     = case_when(
+      input == "state_monthly" & is_provisional ~ "provisional (old unmasked extracts)",
+      input == "state_monthly"                  ~ "final",
+      !present                                  ~ "absent: section skipped",
+      TRUE                                      ~ "present"),
+    path = str_remove(path, paste0(here(), "/")))
+kable(inputs, caption = "Inputs at this render")
+
+d_state |>
+  filter(var %in% c(VARS, "pp", "sbt_all", "chl_all"), date <= WIN_END) |>
+  group_by(var) |>
+  summarize(
+    first = min(date[!is.na(value)]), last = max(date[!is.na(value)]),
+    sanctuaries = n_distinct(nms[!is.na(value)]), missing = sum(is.na(value))) |>
+  kable(caption = "Coverage of the state variables (up to the end of the window)")
+```
+
+## Helper functions
+
+```{r}
+#| label: functions
+
+# transforms ----
+transform_x <- function(var, value) {
+  out <- value
+  i   <- var %in% LOG_VARS
+  out[i] <- ifelse(value[i] > 0, log10(pmax(value[i], 1e-30)), NA_real_)
+  j   <- var == "precip"
+  out[j] <- sqrt(pmax(value[j], 0))
+  out
+}
+
+# calendar-month standardization against a baseline, with an sd floor ----
+standardize <- function(d, base_beg = BASE_BEG, base_end = BASE_END) {
+  d |>
+    mutate(
+      x  = transform_x(var, value),
+      mo = month(date),
+      b  = date >= base_beg & date <= base_end & is.finite(x)) |>
+    group_by(nms, var, mo) |>
+    mutate(
+      mu_m = if (any(b)) mean(x[b]) else NA_real_,
+      sd_m = if (sum(b) > 1) sd(x[b]) else NA_real_) |>
+    group_by(nms, var) |>
+    mutate(
+      sd_pooled = if (sum(b) > 2) sd((x - mu_m)[b]) else NA_real_,
+      sd_use    = pmax(sd_m, SD_FLOOR * sd_pooled),
+      floor_hit = sd_m < SD_FLOOR * sd_pooled,
+      z         = ifelse(is.finite(x) & is.finite(sd_use) & sd_use > 0, (x - mu_m) / sd_use, NA_real_)) |>
+    ungroup()
+}
+
+# per-sanctuary matrix of z over the window; drop variables with too many gaps ----
+build_Z <- function(dz, nms_i, vars = VARS, is_base = IS_BASE, dates = WIN_DATES) {
+  w <- dz |>
+    filter(nms == nms_i, var %in% vars) |>
+    select(date, var, z) |>
+    pivot_wider(names_from = var, values_from = z)
+  w <- tibble(date = dates) |> left_join(w, by = "date")
+  v <- intersect(vars, names(w))
+  Z <- as.matrix(w[, v, drop = FALSE])
+  Z[!is.finite(Z)] <- NA
+  ok <- colMeans(!is.na(Z)) >= 1 - MAX_NA & colMeans(!is.na(Z[is_base, , drop = FALSE])) >= 1 - MAX_NA
+  list(
+    nms = nms_i, Z = Z[, ok, drop = FALSE], vars = v[ok],
+    dropped = setdiff(vars, v[ok]), n_na = sum(is.na(Z[, ok])))
+}
+na0 <- \(Z) { Z[is.na(Z)] <- 0; Z }
+
+# sigma dissimilarity (mahony et al. 2017) ----
+sigma_from_d2 <- function(d2, df) qnorm(pmin(pchisq(d2, df = df), 1 - 1e-12) / 2 + 0.5)
+
+# mahalanobis distance; rows with gaps use the available variables (df = their number)
+mahal_na <- function(Z, center, S) {
+  d2 <- rep(NA_real_, nrow(Z))
+  df <- rep(ncol(Z), nrow(Z))
+  ok <- complete.cases(Z)
+  if (any(ok)) d2[ok] <- mahalanobis(Z[ok, , drop = FALSE], center, S)
+  for (i in which(!ok)) {
+    j <- !is.na(Z[i, ])
+    if (any(j)) {
+      d2[i] <- mahalanobis(Z[i, j, drop = FALSE], center[j], S[j, j, drop = FALSE])
+      df[i] <- sum(j)
+    }
+  }
+  list(d2 = d2, df = df)
+}
+
+# departure from the baseline envelope; baseline months scored leave-one-year-out ----
+score_departure <- function(Z, is_base = IS_BASE, yr = YR_WIN) {
+  B     <- Z[is_base, , drop = FALSE]
+  m     <- mahal_na(Z, colMeans(B, na.rm = TRUE), cov(B, use = "pairwise.complete.obs"))
+  sigma <- sigma_from_d2(m$d2, m$df)
+  sigma_cv <- sigma
+  for (y in unique(yr[is_base])) {
+    tr <- is_base & yr != y
+    te <- is_base & yr == y
+    Bt <- Z[tr, , drop = FALSE]
+    mm <- mahal_na(Z[te, , drop = FALSE], colMeans(Bt, na.rm = TRUE), cov(Bt, use = "pairwise.complete.obs"))
+    sigma_cv[te] <- sigma_from_d2(mm$d2, mm$df)
+  }
+  list(sigma = sigma, sigma_cv = sigma_cv)
+}
+
+# every statistic used for status / trend / form, computed identically for data and null ----
+dep_stats <- function(Z, thr = SIGMA_THR, is_base = IS_BASE) {
+  sc    <- score_departure(Z, is_base, YR_WIN)
+  ex    <- sc$sigma_cv > thr
+  e_per <- vapply(PERIODS$period, \(p) 100 * mean(ex[PER_MASK[[p]]], na.rm = TRUE), numeric(1))
+  e_ann <- vapply(YEARS, \(y) 100 * mean(ex[YR_WIN == y], na.rm = TRUE), numeric(1))
+  run3  <- as.numeric(stats::filter(e_ann, rep(1 / 3, 3), sides = 1))
+  v_sh  <- vapply(
+    PERIODS_VAR$period,
+    \(p) colMeans(abs(Z[PER_MASK[[p]], , drop = FALSE]) > 2, na.rm = TRUE), numeric(ncol(Z)))
+  v_sh  <- matrix(v_sh, nrow = ncol(Z), dimnames = list(colnames(Z), PERIODS_VAR$period))
+  v_mn  <- vapply(
+    PERIODS_VAR$period,
+    \(p) colMeans(Z[PER_MASK[[p]], , drop = FALSE], na.rm = TRUE), numeric(ncol(Z)))
+  v_mn  <- matrix(v_mn, nrow = ncol(Z), dimnames = list(colnames(Z), PERIODS_VAR$period))
+  list(
+    sigma = sc$sigma, sigma_cv = sc$sigma_cv, exceed = ex,
+    e_per = e_per, e_ann = setNames(e_ann, YEARS), run3 = setNames(run3, YEARS), v_sh = v_sh, v_mn = v_mn)
+}
+
+# var(1) red noise ----
+fit_var1 <- function(Zb) {
+  X   <- Zb[-nrow(Zb), , drop = FALSE]
+  Y   <- Zb[-1, , drop = FALSE]
+  Bm  <- solve(crossprod(X), crossprod(X, Y))      # Y = X Bm, so A = t(Bm)
+  A   <- t(Bm)
+  E   <- Y - X %*% Bm
+  Sig <- crossprod(E) / (nrow(E) - ncol(E))
+  eig <- max(Mod(eigen(A, only.values = TRUE)$values))
+  shrunk <- eig >= 1
+  if (shrunk) A <- A * 0.98 / eig
+  list(A = A, Sig = Sig, eig_max = eig, shrunk = shrunk, vars = colnames(Zb))
+}
+sim_var1 <- function(fit, n = N_WIN, burn = 120) {
+  p <- ncol(fit$A)
+  L <- tryCatch(chol(fit$Sig), error = \(e) chol(fit$Sig + diag(1e-8, p)))
+  e <- matrix(rnorm((n + burn) * p), ncol = p) %*% L
+  S <- matrix(0, n + burn, p)
+  for (i in 2:(n + burn)) S[i, ] <- fit$A %*% S[i - 1, ] + e[i, ]
+  S <- S[-seq_len(burn), , drop = FALSE]
+  colnames(S) <- fit$vars
+  S
+}
+# re-standardize each variable by the mean and sd of the first n_b months
+restd <- function(S, n_b = sum(IS_BASE)) {
+  mu <- colMeans(S[seq_len(n_b), , drop = FALSE])
+  s  <- apply(S[seq_len(n_b), , drop = FALSE], 2, sd)
+  sweep(sweep(S, 2, mu), 2, s, "/")
+}
+p_emp <- \(null, obs) (1 + sum(null >= obs - 1e-9)) / (1 + length(null))
+
+# temporal eigenfunctions (aem) with positive moran's i (helper from trajectory_checks.qmd) ----
+aem_cache <- new.env()
+get_aem <- function(n) {
+  key <- as.character(n)
+  if (is.null(aem_cache[[key]])) {
+    set.seed(1)
+    a  <- aem.time(n, moran = TRUE)
+    mi <- as.numeric(a$Moran$obs)
+    E  <- a$aem
+    colnames(E) <- paste0("AEM", seq_len(ncol(E)))
+    aem_cache[[key]] <- E[, mi > 0, drop = FALSE]
+  }
+  aem_cache[[key]]
+}
+period_of_k <- \(k, n = N_WIN) 2 * (n / 12) / k
+band_of     <- \(period_yr) as.character(cut(period_yr, c(0, 1.5, 8, 15, Inf), labels = BANDS))
+
+# forward selection with the double stopping rule, as in the pilot's full_series chunk
+fit_aem_sel <- function(Y, E, nperm = NPERM_AEM, alpha = 0.05) {
+  none <- tibble(k = integer(), r2adj_increment = numeric(), p_value = numeric())
+  r2g  <- RsquareAdj(rda(Y, E))$adj.r.squared
+  if (!is.finite(r2g) || r2g <= 0) return(none)
+  fs <- tryCatch(
+    forward.sel(Y, E, alpha = alpha, adjR2thresh = r2g, nperm = nperm, verbose = FALSE),
+    error = \(e) NULL)
+  if (is.null(fs) || nrow(fs) == 0) return(none)
+  tibble(
+    k               = as.integer(str_remove(colnames(E)[fs$order], "AEM")),
+    r2adj_increment = c(fs$AdjR2Cum[1], diff(fs$AdjR2Cum)),
+    p_value         = fs$pvalue)
+}
+# rda on selected eigenfunctions (get_rda in the pilot); fitted states by least squares
+get_rda <- \(Y, E, ks) rda(Y, E[, paste0("AEM", ks), drop = FALSE])
+fit_states <- function(Y, E, ks) {
+  X <- cbind(1, E[, paste0("AEM", ks), drop = FALSE])
+  X %*% qr.coef(qr(X), Y)
+}
+
+# adjusted r2 of a multivariate linear model (= RsquareAdj(rda(Y, X))) ----
+r2adj_fast <- function(Y, X) {
+  X  <- as.matrix(X)
+  ok <- complete.cases(X)
+  Y  <- Y[ok, , drop = FALSE]; X <- X[ok, , drop = FALSE]
+  n  <- nrow(Y); m <- ncol(X)
+  Yc <- sweep(Y, 2, colMeans(Y))
+  Xc <- sweep(X, 2, colMeans(X))
+  if (m == 1) {
+    r2 <- sum(crossprod(Xc, Yc)^2) / (sum(Xc^2) * sum(Yc^2))
+  } else {
+    r2 <- sum(qr.fitted(qr(Xc), Yc)^2) / sum(Yc^2)
+  }
+  1 - (1 - r2) * (n - 1) / (n - m - 1)
+}
+
+# phase randomization of one series (keeps its power spectrum) ----
+phase_rand <- function(v) {
+  ok  <- which(!is.na(v)); seg <- min(ok):max(ok)
+  x   <- v[seg]
+  if (anyNA(x)) x <- zoo::na.approx(x)
+  n   <- length(x); m <- mean(x)
+  k   <- floor((n - 1) / 2)
+  ph  <- runif(k, 0, 2 * pi)
+  rot <- rep(1 + 0i, n)
+  rot[2:(k + 1)]     <- exp(1i * ph)
+  rot[n:(n - k + 1)] <- exp(-1i * ph)
+  out <- v
+  out[seg] <- Re(fft(fft(x - m) * rot, inverse = TRUE)) / n + m
+  out
+}
+# circular shift of a series by o positions
+circ_shift <- \(x, o) x[((seq_along(x) - 1 + o) %% length(x)) + 1]
+```
+
+### Checks of the helpers on synthetic data
+
+```{r}
+#| label: helper_checks
+
+set.seed(7)
+chk <- list()
+
+# sigma of a point 2 sd out on one of p independent variables (identity covariance)
+chk$sigma <- tibble(p = c(1, 2, 6)) |>
+  mutate(
+    `2 SD on one variable`   = sigma_from_d2(4, p),
+    `2 SD on every variable` = sigma_from_d2(4 * p, p))
+stopifnot(
+  abs(chk$sigma$`2 SD on one variable`[1] - 2) < 1e-9,
+  abs(sigma_from_d2(4, 6) - qnorm(pchisq(4, 6) / 2 + 0.5)) < 1e-12,
+  all(diff(chk$sigma$`2 SD on one variable`) < 0))
+
+# white noise: exceedance near 5%; a 1.5 sd step in one of six variables is detected
+wn <- map_dfr(1:200, \(r) {
+  S  <- restd(matrix(rnorm(N_WIN * 6), ncol = 6, dimnames = list(NULL, VARS)))
+  st <- dep_stats(S)
+  S2 <- S; S2[!IS_BASE, 1] <- S2[!IS_BASE, 1] + 1.5
+  st2 <- dep_stats(S2)
+  tibble(base_cv = st$e_per["base"], post = st$e_per["post"], post_step = st2$e_per["post"],
+         base_in = 100 * mean(st$sigma[IS_BASE] > 2))
+})
+chk$wn <- wn |> summarize(across(everything(), mean))
+stopifnot(
+  between(chk$wn$base_in, 3, 7),
+  between(chk$wn$base_cv, 3, 12),
+  between(chk$wn$post, 3, 10),
+  chk$wn$post_step > 15)
+
+# var(1) recovery on a long series
+A_true <- matrix(c(0.7, 0.1, 0, 0.5), 2)
+f_true <- list(A = A_true, Sig = diag(2), vars = c("a", "b"))
+f_hat  <- fit_var1(sim_var1(f_true, n = 20000))
+stopifnot(max(abs(f_hat$A - A_true)) < 0.03, max(abs(f_hat$Sig - diag(2))) < 0.05)
+
+# sd floor: a month with constant values gets finite z through the floor
+d_syn <- tibble(date = seq(as_date("2003-01-01"), as_date("2012-12-01"), by = "month")) |>
+  mutate(nms = "X", var = "sst", value = rnorm(n()) + if_else(month(date) == 7, 0, 0))
+d_syn$value[month(d_syn$date) == 7] <- 10
+z_syn <- standardize(d_syn)
+stopifnot(
+  all(z_syn$floor_hit[month(z_syn$date) == 7]),
+  all(is.finite(z_syn$z)),
+  !any(z_syn$floor_hit[month(z_syn$date) != 7]))
+
+# r2adj_fast equals vegan's adjusted r2 of the rda
+Yt <- matrix(rnorm(300), 50); Xt <- matrix(rnorm(100), 50)
+stopifnot(
+  abs(r2adj_fast(Yt, Xt) - RsquareAdj(rda(Yt, Xt))$adj.r.squared) < 1e-10,
+  abs(r2adj_fast(Yt, Xt[, 1, drop = FALSE]) - RsquareAdj(rda(Yt, Xt[, 1, drop = FALSE]))$adj.r.squared) < 1e-10)
+
+# phase randomization keeps the amplitude spectrum; circular shift keeps the count
+xs <- cumsum(rnorm(285)); xr <- phase_rand(xs)
+stopifnot(
+  max(abs(Mod(fft(xs - mean(xs))) - Mod(fft(xr - mean(xr))))) < 1e-6,
+  sum(circ_shift(1:10 > 7, 4)) == 3)
+
+# time-scale bands
+stopifnot(
+  band_of(period_of_k(3)) == "trend-like", band_of(period_of_k(4)) == "decadal",
+  band_of(period_of_k(30)) == "interannual", band_of(period_of_k(31)) == "sub-annual")
+
+chk$sigma |> mutate(across(-p, \(x) round(x, 2))) |>
+  kable(caption = "Sigma dissimilarity of a point 2 SD from the centre (identity covariance): one variable vs all p")
+chk$wn |> mutate(across(everything(), \(x) round(x, 1))) |>
+  rename(`baseline, in sample (%)` = base_in, `baseline, leave-one-year-out (%)` = base_cv,
+         `2013-2025 (%)` = post, `2013-2025 with a 1.5 SD step in one variable (%)` = post_step) |>
+  kable(caption = "Share of months beyond 2 sigma for white noise (p = 6, 200 series)")
+```
+
+## 1. Standardized anomalies
+
+Each variable is transformed (log10 for chlorophyll and mixed-layer depth, square root for
+precipitation), then standardized by calendar month against 2003-2012. The SD of a calendar month
+is floored at half the pooled baseline SD, so near-constant months do not inflate anomalies.
+
+```{r}
+#| label: z
+
+dz_all <- standardize(d_state |> filter(var %in% VARS))
+dz     <- dz_all |> filter(date >= WIN_BEG, date <= WIN_END)
+
+Z_list <- map(set_names(NMS_ORD), \(n) build_Z(dz, n))
+stopifnot(all(map_int(Z_list, \(zi) nrow(zi$Z)) == N_WIN), all(map_int(Z_list, \(zi) ncol(zi$Z)) >= 2))
+P_OF <- map_int(Z_list, \(zi) ncol(zi$Z))
+
+dz |>
+  select(nms, date, var, value, x, z) |>
+  arrange(factor(nms, NMS_ORD), var, date) |>
+  write_csv(out("z_monthly.csv"))
+dz_all |>
+  filter(var %in% c("sst", "sbt"), date >= TEMP_BEG, date <= WIN_END) |>
+  select(nms, date, var, value, x, z) |>
+  arrange(factor(nms, NMS_ORD), var, date) |>
+  write_csv(out("z_temp_1993.csv"))
+
+floor_tbl <- dz |>
+  distinct(nms, var, mo, floor_hit) |>
+  group_by(nms, var) |>
+  summarize(n = sum(floor_hit, na.rm = TRUE)) |>
+  pivot_wider(names_from = var, values_from = n) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms)
+n_floor_cells  <- dz |> distinct(nms, var, mo, floor_hit) |> summarize(n = sum(floor_hit, na.rm = TRUE)) |> pull(n)
+n_floor_months <- dz |> summarize(n = sum(floor_hit & !is.na(z), na.rm = TRUE)) |> pull(n)
+floor_tbl |>
+  kable(caption = glue(
+    "Calendar months (of 12) whose SD was raised to the floor, by sanctuary and variable. ",
+    "In total {n_floor_cells} sanctuary-variable-calendar-month cells, i.e. {n_floor_months} ",
+    "sanctuary-variable-months in the window."))
+
+tibble(
+  nms     = NMS_ORD,
+  p       = P_OF,
+  used    = map_chr(Z_list, \(zi) paste(zi$vars, collapse = ", ")),
+  dropped = map_chr(Z_list, \(zi) paste(zi$dropped, collapse = ", ")),
+  `missing z filled for models` = map_int(Z_list, \(zi) zi$n_na)) |>
+  kable(caption = "Variables used per sanctuary")
+```
+
+## 2. Multivariate departure from the baseline envelope
+
+For each month, the Mahalanobis distance of the anomaly vector from the baseline centre (baseline
+covariance) is expressed as sigma dissimilarity, the equivalent number of SDs of a univariate
+normal. Baseline months are scored leave-one-year-out (`sigma_cv`).
+
+```{r}
+#| label: departure
+
+obs_stats <- map(Z_list, \(zi) dep_stats(zi$Z))
+d_dep <- imap_dfr(obs_stats, \(st, n) tibble(
+  nms      = n,
+  date     = WIN_DATES,
+  sigma    = st$sigma,
+  sigma_cv = st$sigma_cv,
+  exceed   = st$exceed,
+  d_rms    = sqrt(rowMeans(Z_list[[n]]$Z^2, na.rm = TRUE)))) |>
+  group_by(nms) |>
+  mutate(
+    sigma_run12  = rollmean(sigma_cv, 12, fill = NA, align = "center"),
+    exceed_run12 = rollmean(as.numeric(exceed), 12, fill = NA, align = "center")) |>
+  ungroup()
+stopifnot(nrow(d_dep) == N_WIN * length(NMS_ORD), !anyNA(d_dep$sigma_cv))
+
+e_base <- map_dbl(obs_stats, \(st) st$e_per["base"])
+e_base_in <- map_dbl(obs_stats, \(st) 100 * mean(st$sigma[IS_BASE] > SIGMA_THR))
+stopifnot(all(between(e_base, 1, 20)))
+if (any(!between(e_base, 4, 13)))
+  note("baseline out-of-sample exceedance outside 4-13% for {paste(NMS_ORD[!between(e_base, 4, 13)], collapse = ', ')}")
+
+d_dep |>
+  mutate(nms = factor(nms, NMS_ORD), yr = year(date)) |>
+  group_by(nms) |>
+  summarize(
+    `baseline in sample` = 100 * mean(sigma[yr <= 2012] > SIGMA_THR),
+    `baseline out of sample` = 100 * mean(exceed[yr <= 2012]),
+    `2013-2015` = 100 * mean(exceed[between(yr, 2013, 2015)]),
+    `2016-2020` = 100 * mean(exceed[between(yr, 2016, 2020)]),
+    `2021-2025` = 100 * mean(exceed[yr >= 2021])) |>
+  mutate(across(-nms, \(x) round(x, 1))) |>
+  kable(caption = glue("Share of months (%) beyond {SIGMA_THR} sigma"))
+```
+
+```{r}
+#| label: fig_sigma
+#| fig-width: 10
+#| fig-height: 8
+
+p <- d_dep |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  ggplot(aes(date, sigma_cv)) +
+  annotate("rect", xmin = BASE_BEG, xmax = BASE_END, ymin = -Inf, ymax = Inf, fill = PAL$grid, alpha = 0.5) +
+  geom_hline(yintercept = SIGMA_THR, color = PAL$orange, linewidth = 0.3) +
+  geom_line(color = PAL$axis, linewidth = 0.25) +
+  geom_line(aes(y = sigma_run12), color = PAL$blue, linewidth = 0.6) +
+  facet_wrap(~nms, ncol = 3) +
+  labs(
+    title = "Departure from the 2003-2012 envelope",
+    subtitle = "Monthly sigma dissimilarity (grey; baseline scored leave-one-year-out), 12-month running mean (blue), 2 sigma (orange)",
+    x = NULL, y = "sigma") +
+  theme_chk()
+save_fig(p, "diag_sigma.png", 10, 8)
+```
+
+## 3. Null model: stationary red noise with the baseline's own persistence
+
+A VAR(1) fitted to each sanctuary's baseline anomalies generates `r N_SUR` stationary series of
+`r N_WIN` months. Each is re-standardized on its first 120 months and scored exactly as the data,
+which gives the exceedance expected from persistence alone, without any change.
+
+```{r}
+#| label: null_model
+
+var1_fits <- map(Z_list, \(zi) fit_var1(na0(zi$Z)[IS_BASE, , drop = FALSE]))
+null_files <- out(c("null_draws.csv", "null_exceedance.csv", "null_var.csv"))
+# recompute when an input is newer, or when the cache predates the period-mean quantiles
+null_ok <- is_fresh(null_files) &&
+  all(c("q025_mean", "q975_mean") %in% names(read_csv(null_files[3], n_max = 1))) &&
+  setequal(unique(read_csv(null_files[2])$nms), NMS_ORD)
+
+if (!null_ok) {
+  run_null <- function(nms_i) {
+    set.seed(seed_of(nms_i))
+    fit  <- var1_fits[[nms_i]]
+    p    <- ncol(fit$A)
+    e    <- matrix(NA_real_, N_SUR, nrow(PERIODS), dimnames = list(NULL, PERIODS$period))
+    vs   <- array(NA_real_, c(N_SUR, p, nrow(PERIODS_VAR)), dimnames = list(NULL, fit$vars, PERIODS_VAR$period))
+    vm   <- vs
+    for (r in seq_len(N_SUR)) {
+      st <- dep_stats(restd(sim_var1(fit)))
+      e[r, ]    <- st$e_per
+      vs[r, , ] <- st$v_sh
+      vm[r, , ] <- st$v_mn
+    }
+    list(
+      draws  = as_tibble(e) |> mutate(nms = nms_i, rep = row_number()) |>
+        pivot_longer(-c(nms, rep), names_to = "period", values_to = "e_pct"),
+      var    = expand_grid(var = fit$vars, period = PERIODS_VAR$period) |>
+        mutate(
+          nms       = nms_i,
+          q95_share = map2_dbl(var, period, \(v, pp) quantile(vs[, v, pp], 0.95)),
+          q025_mean = map2_dbl(var, period, \(v, pp) quantile(vm[, v, pp], 0.025)),
+          q975_mean = map2_dbl(var, period, \(v, pp) quantile(vm[, v, pp], 0.975))) |>
+        select(nms, var, period, q95_share, q025_mean, q975_mean))
+  }
+  res <- mclapply(NMS_ORD, run_null, mc.cores = N_CORE)
+  stopifnot(!any(map_lgl(res, \(r) inherits(r, "try-error"))))
+  d_null_draws <- map_dfr(res, "draws")
+  write_csv(d_null_draws, null_files[1])
+  d_null_draws |>
+    group_by(nms, period) |>
+    summarize(q50 = quantile(e_pct, 0.5), q95 = quantile(e_pct, 0.95), q99 = quantile(e_pct, 0.99)) |>
+    ungroup() |>
+    write_csv(null_files[2])
+  write_csv(map_dfr(res, "var"), null_files[3])
+}
+d_null_draws <- read_csv(null_files[1])
+d_null_e     <- read_csv(null_files[2])
+d_null_var   <- read_csv(null_files[3])
+stopifnot(
+  nrow(d_null_draws) == N_SUR * nrow(PERIODS) * length(NMS_ORD),
+  all(between(d_null_e$q50[d_null_e$period == "base"], 2, 12)),
+  all(between(d_null_e$q50[d_null_e$period == "post"], 1, 15)))
+
+tibble(
+  nms       = NMS_ORD,
+  p         = P_OF,
+  `max |eigenvalue| of A` = round(map_dbl(var1_fits, "eig_max"), 3),
+  shrunk    = map_lgl(var1_fits, "shrunk")) |>
+  left_join(
+    d_null_e |>
+      mutate(q = glue("{round(q50, 1)} / {round(q95, 1)}")) |>
+      select(nms, period, q) |>
+      pivot_wider(names_from = period, values_from = q),
+    by = "nms") |>
+  kable(caption = "VAR(1) persistence and null exceedance (%), median / 95th percentile, by period")
+```
+
+## 4. Status, trend and form
+
+Each period's exceedance is compared with its own null 95th percentile. Status: outside when
+2021-2025 exceeds its null; trend: change since 2016-2020 (10 points); form: the shape of the
+three post-baseline periods; first period outside: the first of the three whose exceedance is above its null 95th percentile.
+
+```{r}
+#| label: status
+
+d_eper <- imap_dfr(obs_stats, \(st, n) tibble(
+  nms          = n,
+  period       = PERIODS$period,
+  e_pct        = unname(st$e_per),
+  sigma_median = map_dbl(PERIODS$period, \(p) median(st$sigma_cv[PER_MASK[[p]]], na.rm = TRUE)))) |>
+  left_join(d_null_e |> select(nms, period, null_q50 = q50, null_q95 = q95), by = c("nms", "period")) |>
+  rowwise() |>
+  mutate(p_value = p_emp(d_null_draws$e_pct[d_null_draws$nms == nms & d_null_draws$period == period], e_pct)) |>
+  ungroup()
+
+d_eann <- imap_dfr(obs_stats, \(st, n) tibble(
+  nms        = n,
+  year       = YEARS,
+  e_pct      = unname(st$e_ann),
+  sigma_mean = map_dbl(YEARS, \(y) mean(st$sigma_cv[YR_WIN == y], na.rm = TRUE)),
+  n_months   = map_int(YEARS, \(y) sum(!is.na(st$sigma_cv[YR_WIN == y])))))
+d_eann |> select(nms, year, e_pct, sigma_mean, n_months) |> write_csv(out("exceedance_annual.csv"))
+
+d_shift <- imap_dfr(Z_list, \(zi, n) expand_grid(var = zi$vars, period = c("2016-2025", "2021-2025")) |>
+  mutate(
+    nms      = n,
+    mean_z   = map2_dbl(var, period, \(v, p) mean(zi$Z[PER_MASK[[p]], v], na.rm = TRUE)),
+    share_hi = map2_dbl(var, period, \(v, p) mean(zi$Z[PER_MASK[[p]], v] > 2, na.rm = TRUE)),
+    share_lo = map2_dbl(var, period, \(v, p) mean(zi$Z[PER_MASK[[p]], v] < -2, na.rm = TRUE)))) |>
+  left_join(
+    d_null_var |> rename(null_q95_share = q95_share, null_q025_mean = q025_mean, null_q975_mean = q975_mean),
+    by = c("nms", "var", "period")) |>
+  mutate(
+    sig      = share_hi + share_lo > null_q95_share,
+    sig_mean = mean_z < null_q025_mean | mean_z > null_q975_mean) |>
+  select(nms, var, period, mean_z, share_hi, share_lo, null_q95_share, sig, null_q025_mean, null_q975_mean, sig_mean)
+stopifnot(!anyNA(d_shift$null_q95_share), !anyNA(d_shift$sig_mean))
+write_csv(d_shift, out("shift_by_var.csv"))
+
+# status, trend, form, first period outside ----
+classify_form <- function(E, Q) {
+  x <- E > Q
+  m <- max(E[1:2])
+  case_when(
+    !x[3] & !any(x[1:2]) ~ "within baseline range",
+    !x[3]                ~ "excursion and return",
+    E[3] >= m + 10       ~ "growing departure",
+    E[3] <= m - 10       ~ "partial return",
+    TRUE                 ~ "sustained departure")
+}
+d_status <- d_eper |>
+  filter(period %in% c("2013-2015", "2016-2020", "2021-2025")) |>
+  group_by(nms) |>
+  arrange(period, .by_group = TRUE) |>
+  summarize(
+    status = if_else(e_pct[3] > null_q95[3], "outside", "within"),
+    delta  = e_pct[3] - e_pct[2],
+    trend  = case_when(delta >= 10 ~ "increasing", delta <= -10 ~ "decreasing", TRUE ~ "steady"),
+    form   = classify_form(e_pct, null_q95),
+    first_period_outside = if (any(e_pct > null_q95)) period[which(e_pct > null_q95)[1]] else NA_character_)
+stopifnot(nrow(d_status) == length(NMS_ORD))
+
+d_eper |>
+  filter(period != "post") |>
+  mutate(cell = glue("{round(e_pct)} ({round(null_q95)})")) |>
+  select(nms, period, cell) |>
+  pivot_wider(names_from = period, values_from = cell) |>
+  left_join(d_status |> mutate(delta = round(delta)), by = "nms") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Exceedance (%) by period with the null 95th percentile in brackets; status, trend and form")
+
+d_shift |>
+  filter(period == "2021-2025") |>
+  mutate(cell = paste0(sprintf("%+.1f", mean_z), if_else(sig_mean, "†", ""), if_else(sig, "*", ""))) |>
+  select(nms, var, cell) |>
+  pivot_wider(names_from = var, values_from = cell) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  select(nms, any_of(VARS)) |>
+  kable(caption = "Mean z in 2021-2025 by variable († = mean outside the null 2.5-97.5 percentile range; * = share of months with |z| > 2 above the null 95th percentile)")
+```
+
+```{r}
+#| label: fig_null
+#| fig-width: 9
+#| fig-height: 5
+
+p <- d_eper |>
+  filter(period %in% c("base", "2013-2015", "2016-2020", "2021-2025")) |>
+  mutate(nms = factor(nms, rev(NMS_ORD)), period = factor(period, c("base", "2013-2015", "2016-2020", "2021-2025"))) |>
+  ggplot(aes(y = nms)) +
+  geom_linerange(aes(xmin = null_q50, xmax = null_q95), color = PAL$axis, linewidth = 2) +
+  geom_point(aes(x = e_pct), color = PAL$orange, size = 1.8) +
+  facet_wrap(~period, nrow = 1) +
+  labs(
+    title = "Observed exceedance vs the red-noise null",
+    subtitle = "Share of months beyond 2 sigma (orange); grey bar = null median to 95th percentile",
+    x = "% of months", y = NULL) +
+  theme_chk()
+save_fig(p, "diag_null.png", 9, 5)
+```
+
+## 5. Temporal eigenfunction model (AEM-RDA)
+
+One model per sanctuary on all `r N_WIN` months: eigenfunctions with positive Moran's I, forward
+selection with the double stopping rule, then RDA. Selected eigenfunctions are grouped by full-cycle
+period into four time-scale bands.
+
+```{r}
+#| label: aem
+
+E_aem <- get_aem(N_WIN)
+stopifnot(nrow(E_aem) == N_WIN, ncol(E_aem) > 50)
+aem_files <- out(c("aem_selected.csv"))
+
+if (!is_fresh(aem_files)) {
+  res <- mclapply(NMS_ORD, \(n) {
+    set.seed(seed_of(n, 1))
+    fit_aem_sel(na0(Z_list[[n]]$Z), E_aem, nperm = NPERM_AEM) |> mutate(nms = n, .before = 1)
+  }, mc.cores = N_CORE)
+  stopifnot(!any(map_lgl(res, \(r) inherits(r, "try-error"))))
+  bind_rows(res) |>
+    mutate(period_yr = period_of_k(k), band = band_of(period_yr)) |>
+    select(nms, k, period_yr, band, r2adj_increment, p_value) |>
+    write_csv(aem_files[1])
+}
+d_aem_sel <- read_csv(aem_files[1])
+
+d_aem_bands <- expand_grid(nms = NMS_ORD, band = BANDS) |>
+  left_join(d_aem_sel |> group_by(nms, band) |> summarize(r2adj = sum(r2adj_increment)), by = c("nms", "band")) |>
+  mutate(r2adj = replace_na(r2adj, 0))
+d_aem_tot <- tibble(nms = NMS_ORD, p = P_OF) |>
+  left_join(d_aem_sel |> group_by(nms) |> summarize(r2adj = sum(r2adj_increment), n_selected = n()), by = "nms") |>
+  mutate(r2adj = replace_na(r2adj, 0), n_selected = replace_na(n_selected, 0L)) |>
+  select(nms, r2adj, n_selected, p)
+write_csv(d_aem_bands, out("aem_bands.csv"))
+write_csv(d_aem_tot, out("aem_total.csv"))
+
+# fitted states; the rda adjusted r2 must equal the summed increments
+d_fit <- map_dfr(NMS_ORD, \(n) {
+  Y  <- na0(Z_list[[n]]$Z)
+  ks <- d_aem_sel$k[d_aem_sel$nms == n]
+  if (length(ks) > 0) {
+    r2 <- RsquareAdj(get_rda(Y, E_aem, ks))$adj.r.squared
+    stopifnot(abs(r2 - sum(d_aem_sel$r2adj_increment[d_aem_sel$nms == n])) < 1e-6)
+    Fz <- fit_states(Y, E_aem, ks)
+  } else {
+    Fz <- matrix(colMeans(Y), N_WIN, ncol(Y), byrow = TRUE, dimnames = list(NULL, colnames(Y)))
+  }
+  as_tibble(Fz) |> mutate(nms = n, date = WIN_DATES) |>
+    pivot_longer(-c(nms, date), names_to = "var", values_to = "z_fit")
+}) |> select(nms, date, var, z_fit)
+write_csv(d_fit, out("fitted_monthly.csv"))
+
+d_aem_bands |>
+  mutate(r2adj = round(100 * r2adj, 1), band = factor(band, BANDS)) |>
+  pivot_wider(names_from = band, values_from = r2adj, names_sort = TRUE) |>
+  left_join(d_aem_tot |> mutate(`total (%)` = round(100 * r2adj, 1)) |> select(nms, `total (%)`, `selected` = n_selected), by = "nms") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Adjusted R2 (%) of the eigenfunction model by time-scale band (full-cycle period: sub-annual <= 1.5 yr, interannual 1.5-8, decadal 8-15, trend-like > 15)")
+```
+
+```{r}
+#| label: fig_aem_bands
+#| fig-width: 9
+#| fig-height: 4.8
+
+p <- d_aem_bands |>
+  mutate(nms = factor(nms, rev(NMS_ORD)), band = factor(band, BANDS)) |>
+  ggplot(aes(r2adj, nms)) +
+  geom_col(aes(fill = band), width = 0.62, color = PAL$surface, linewidth = 0.6, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = setNames(PAL_BAND, BANDS), name = "time-scale band") +
+  scale_x_continuous(labels = label_percent()) +
+  labs(title = "Eigenfunction model: adjusted R2 by time-scale band", x = "adjusted R2", y = NULL) +
+  theme_chk()
+save_fig(p, "diag_aem_bands.png", 9, 4.8)
+```
+
+## 6. A common state space for all sanctuaries
+
+One uncentred, unscaled PCA of the annual mean anomalies of all sanctuaries pooled: the origin is
+"at baseline" and units are baseline SDs. Axis 1 is oriented so `sst` loads positive, axis 2 so
+`chl` loads positive.
+
+```{r}
+#| label: pca
+
+ann_z <- dz |>
+  mutate(year = year(date)) |>
+  filter(var %in% VARS) |>
+  semi_join(imap_dfr(Z_list, \(zi, n) tibble(nms = n, var = zi$vars)), by = c("nms", "var")) |>
+  group_by(nms, year, var) |>
+  summarize(z = mean(z, na.rm = TRUE)) |>
+  ungroup() |>
+  pivot_wider(names_from = var, values_from = z) |>
+  right_join(expand_grid(nms = NMS_ORD, year = YEARS), by = c("nms", "year"))
+for (v in setdiff(VARS, names(ann_z))) ann_z[[v]] <- 0
+ann_z <- ann_z |> mutate(across(all_of(VARS), \(x) replace_na(x, 0))) |> arrange(factor(nms, NMS_ORD), year)
+X_ann <- as.matrix(ann_z[, VARS])
+
+pc  <- prcomp(X_ann, center = FALSE, scale. = FALSE)
+rot <- pc$rotation[, 1:3]
+if (rot["sst", 1] < 0) rot[, 1] <- -rot[, 1]
+if (rot["chl", 2] < 0) rot[, 2] <- -rot[, 2]
+var_share <- pc$sdev^2 / sum(pc$sdev^2)
+colnames(rot) <- c("pc1", "pc2", "pc3")
+
+d_load <- bind_rows(
+  as_tibble(rot, rownames = "var"),
+  tibble(var = "variance_share", pc1 = var_share[1], pc2 = var_share[2], pc3 = var_share[3]))
+write_csv(d_load, out("pca_loadings.csv"))
+
+S_ann <- X_ann %*% rot
+d_pca_ann <- ann_z |> select(nms, year) |> bind_cols(as_tibble(S_ann))
+write_csv(d_pca_ann, out("pca_scores_annual.csv"))
+
+d_pca_fit <- d_fit |>
+  pivot_wider(names_from = var, values_from = z_fit)
+for (v in setdiff(VARS, names(d_pca_fit))) d_pca_fit[[v]] <- 0
+d_pca_fit <- d_pca_fit |> mutate(across(all_of(VARS), \(x) replace_na(x, 0)))
+S_fit <- as.matrix(d_pca_fit[, VARS]) %*% rot[, 1:2]
+d_pca_fit <- d_pca_fit |> select(nms, date) |> bind_cols(as_tibble(S_fit))
+write_csv(d_pca_fit, out("pca_scores_fit.csv"))
+
+# 95% prediction ellipse of the ten baseline annual means ----
+ellipse_of <- function(S, n_pts = 100) {
+  n  <- nrow(S)
+  r2 <- 2 * (n - 1) * (n + 1) / (n * (n - 2)) * qf(0.95, 2, n - 2)
+  L  <- t(chol(cov(S)))
+  th <- seq(0, 2 * pi, length.out = n_pts + 1)
+  t(colMeans(S) + sqrt(r2) * L %*% rbind(cos(th), sin(th)))
+}
+d_ell <- d_pca_ann |>
+  filter(year <= 2012) |>
+  group_by(nms) |>
+  group_modify(\(d, k) { e <- ellipse_of(as.matrix(d[, c("pc1", "pc2")])); tibble(pc1 = e[, 1], pc2 = e[, 2]) }) |>
+  ungroup() |>
+  arrange(factor(nms, NMS_ORD))
+write_csv(d_ell, out("pca_baseline_ellipse.csv"))
+
+d_load |> mutate(across(-var, \(x) round(x, 2))) |>
+  kable(caption = "Loadings of the common state space (last row: share of the total sum of squares)")
+```
+
+```{r}
+#| label: fig_pca
+#| fig-width: 10
+#| fig-height: 8
+
+p <- d_pca_ann |>
+  mutate(nms = factor(nms, NMS_ORD), post = year >= 2013) |>
+  ggplot(aes(pc1, pc2)) +
+  geom_hline(yintercept = 0, color = PAL$axis, linewidth = 0.2) +
+  geom_vline(xintercept = 0, color = PAL$axis, linewidth = 0.2) +
+  geom_polygon(data = d_ell |> mutate(nms = factor(nms, NMS_ORD)), fill = PAL$grid, color = PAL$axis, linewidth = 0.3) +
+  geom_path(color = PAL$axis, linewidth = 0.3) +
+  geom_point(aes(color = year), size = 1.2) +
+  facet_wrap(~nms, ncol = 4) +
+  scale_color_gradient(low = PAL$blue, high = PAL$orange) +
+  labs(
+    title = "Annual trajectories in the common state space",
+    subtitle = glue("PC1 {percent(var_share[1], 1)}, PC2 {percent(var_share[2], 1)}; grey = 95% prediction ellipse of the 2003-2012 annual means"),
+    x = "PC1", y = "PC2") +
+  theme_chk()
+save_fig(p, "diag_pca.png", 10, 8)
+```
+
+## 7. Documented events
+
+Each catalogued event is scored on its own months (no padding) by its **prominence**: the mean
+`sigma_cv` over the event months minus the mean over the 24 months before it (at least 6 needed).
+The observed prominence is ranked among the prominences of every window of the same length in that
+sanctuary's series (`pct_prom`, 0-100); the event registers when `pct_prom >= 90`. This compares an
+event with its own sanctuary's background, unlike "any month beyond 2 sigma" (`exceed_any`, kept),
+which chance alone satisfies for most long windows once the background rate is high. The peak,
+signature and expected-direction check use the event months plus one month either side, because
+catalogue dates are approximate. Group test: each event is moved to a random start month (same
+sanctuary, same length) in each of `r N_EV_SUR` draws.
+
+```{r}
+#| label: events
+
+N_BEFORE     <- 24
+N_BEFORE_MIN <- 6
+PCT_REG      <- 90
+
+d_ev <- read_csv(events_csv, col_types = cols(.default = "c")) |>
+  mutate(
+    date_start = as_date(date_start),
+    date_end   = as_date(coalesce(date_end, as.character(date_start))),
+    resolvable = as.logical(toupper(str_trim(resolvable))))
+stopifnot(all(c("event_id", "nms", "date_start", "date_end", "vars_expected", "resolvable") %in% names(d_ev)))
+
+# event months, and event months padded by one month for the signature
+ev_core <- map2(d_ev$date_start, d_ev$date_end, \(d0, d1)
+  which(WIN_DATES >= floor_date(d0, "month") & WIN_DATES <= floor_date(d1, "month")))
+ev_idx  <- map2(d_ev$date_start, d_ev$date_end, \(d0, d1) {
+  w0 <- floor_date(d0, "month") %m-% months(1)
+  w1 <- floor_date(d1, "month") %m+% months(1)
+  which(WIN_DATES >= w0 & WIN_DATES <= w1)
+})
+ex_list <- map(set_names(NMS_ORD), \(n) replace_na(d_dep$exceed[d_dep$nms == n], FALSE))
+sc_list <- map(set_names(NMS_ORD), \(n) d_dep$sigma_cv[d_dep$nms == n])
+
+# prominence of the window starting at st (length L) for every valid start ----
+prom_all <- function(sc, L) {
+  n  <- length(sc)
+  cs <- c(0, cumsum(sc))
+  if (L < 1 || n - L + 1 < N_BEFORE_MIN + 1) return(tibble(st = integer(), prom = numeric()))
+  st <- seq(N_BEFORE_MIN + 1, n - L + 1)
+  b0 <- pmax(1, st - N_BEFORE)
+  tibble(
+    st   = st,
+    prom = (cs[st + L] - cs[st]) / L - (cs[st] - cs[b0]) / (st - b0))
+}
+# check against a direct computation
+sc_t <- sc_list[[1]]; pa <- prom_all(sc_t, 5)
+stopifnot(abs(pa$prom[pa$st == 40] - (mean(sc_t[40:44]) - mean(sc_t[16:39]))) < 1e-12,
+          abs(pa$prom[1] - (mean(sc_t[7:11]) - mean(sc_t[1:6]))) < 1e-12)
+
+parse_expected <- function(s) {
+  if (is.na(s) || str_trim(s) == "") return(tibble(var = character(), sgn = numeric()))
+  tok <- str_trim(str_split(s, ";")[[1]])
+  tok <- tok[str_detect(tok, "^[a-z_]+[+-]$")]
+  tibble(var = str_remove(tok, "[+-]$"), sgn = if_else(str_ends(tok, "\\+"), 1, -1))
+}
+score_event <- function(nms_i, core, idx, vars_expected) {
+  na_z <- set_names(rep(NA_real_, length(VARS)), VARS)
+  res  <- list(sigma_max = NA_real_, date_peak = as_date(NA), pct_rank = NA_real_, exceed_any = NA,
+               direction_ok = NA, sigma_event = NA_real_, sigma_before = NA_real_, prominence = NA_real_,
+               pct_prom = NA_real_, null_pct = numeric(), z = na_z, zx = na_z)
+  if (!(nms_i %in% NMS_ORD) || length(idx) == 0) return(res)
+  sc  <- sc_list[[nms_i]]
+  if (all(is.na(sc[idx]))) return(res)
+  j   <- idx[which.max(sc[idx])]
+  Z   <- Z_list[[nms_i]]$Z
+  res$sigma_max  <- sc[j]
+  res$date_peak  <- WIN_DATES[j]
+  res$pct_rank   <- 100 * rank(sc, na.last = "keep")[j] / sum(!is.na(sc))
+  res$exceed_any <- any(ex_list[[nms_i]][idx])
+  for (v in colnames(Z)) {
+    res$z[v]  <- Z[j, v]
+    w <- Z[idx, v]
+    if (any(!is.na(w))) res$zx[v] <- w[which.max(abs(w))]
+  }
+  ex <- parse_expected(vars_expected) |> filter(var %in% colnames(Z))
+  if (nrow(ex) > 0)
+    res$direction_ok <- all(map2_lgl(ex$var, ex$sgn, \(v, s) any(s * Z[idx, v] >= 1.5, na.rm = TRUE)))
+  # prominence on the event months
+  if (length(core) > 0) {
+    st0 <- core[1]; L <- length(core)
+    res$sigma_event <- mean(sc[core])
+    if (st0 - 1 >= N_BEFORE_MIN) {
+      res$sigma_before <- mean(sc[max(1, st0 - N_BEFORE):(st0 - 1)])
+      res$prominence   <- res$sigma_event - res$sigma_before
+      np <- prom_all(sc, L)$prom
+      if (length(np) > 0) {
+        res$pct_prom <- 100 * mean(np <= res$prominence + 1e-12)
+        res$null_pct <- 100 * ecdf(np)(np)       # percentile of every possible window, for the group test
+      }
+    }
+  }
+  res
+}
+ev_scores <- pmap(list(d_ev$nms, ev_core, ev_idx, d_ev$vars_expected), score_event)
+d_ev_scored <- d_ev |>
+  mutate(
+    n_months     = map_int(ev_core, length),
+    sigma_max    = map_dbl(ev_scores, "sigma_max"),
+    date_peak    = do.call(c, map(ev_scores, "date_peak")),
+    pct_rank     = map_dbl(ev_scores, "pct_rank"),
+    exceed_any   = map_lgl(ev_scores, "exceed_any"),
+    direction_ok = map_lgl(ev_scores, "direction_ok"),
+    sigma_event  = map_dbl(ev_scores, "sigma_event"),
+    sigma_before = map_dbl(ev_scores, "sigma_before"),
+    prominence   = map_dbl(ev_scores, "prominence"),
+    pct_prom     = map_dbl(ev_scores, "pct_prom"),
+    registered   = pct_prom >= PCT_REG) |>
+  bind_cols(
+    map_dfr(ev_scores, \(s) as_tibble(as.list(s$z))) |> rename_with(\(x) paste0("z_", x)),
+    map_dfr(ev_scores, \(s) as_tibble(as.list(s$zx))) |> rename_with(\(x) paste0("zx_", x)))
+write_csv(d_ev_scored, out("events_scored.csv"))
+
+# group test: random start month per event (same sanctuary, same length) ----
+ok_ev  <- which(!is.na(d_ev_scored$registered) & !is.na(d_ev_scored$resolvable))
+res_ok <- d_ev_scored$resolvable[ok_ev]
+obs_reg <- d_ev_scored$registered[ok_ev]
+set.seed(4242)
+null_reg <- t(replicate(N_EV_SUR, {
+  h <- map_lgl(ok_ev, \(i) { np <- ev_scores[[i]]$null_pct; np[sample.int(length(np), 1)] >= PCT_REG })
+  c(`TRUE` = mean(h[res_ok]), `FALSE` = mean(h[!res_ok]))
+}))
+d_ev_test <- map_dfr(c(TRUE, FALSE), \(g) {
+  n <- sum(res_ok == g)
+  if (n == 0) return(tibble(group = if (g) "resolvable" else "not resolvable", n = 0L,
+                            hit_rate = NA_real_, null_mean = NA_real_, null_q95 = NA_real_, p_value = NA_real_))
+  nh <- null_reg[, as.character(g)]
+  ob <- mean(obs_reg[res_ok == g])
+  tibble(group = if (g) "resolvable" else "not resolvable", n = n, hit_rate = ob,
+         null_mean = mean(nh), null_q95 = unname(quantile(nh, 0.95)), p_value = p_emp(nh, ob))
+})
+write_csv(d_ev_test, out("events_test.csv"))
+
+n_unscored <- nrow(d_ev_scored) - length(ok_ev)
+if (n_unscored > 0) note("{n_unscored} catalogue events not scored (outside the window, fewer than {N_BEFORE_MIN} prior months, sanctuary absent, or resolvable missing)")
+
+d_ev_test |> mutate(across(c(hit_rate, null_mean, null_q95), \(x) round(x, 2)), p_value = round(p_value, 3)) |>
+  kable(caption = glue("Share of events registered (prominence at or above the {PCT_REG}th percentile of same-length windows) vs {N_EV_SUR} random placements"))
+d_ev_scored |>
+  filter(!is.na(pct_prom)) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(desc(resolvable), nms, date_start) |>
+  transmute(
+    event_id, resolvable, months = n_months, sigma_event = round(sigma_event, 1),
+    before = round(sigma_before, 1), pct_prom = round(pct_prom), registered, exceed_any, direction_ok,
+    signature = pmap_chr(across(paste0("zx_", VARS)), \(...) {
+      v <- c(...); v <- v[!is.na(v) & abs(v) >= 1.5]
+      paste(sprintf("%s %+.1f", str_remove(names(v), "zx_"), v), collapse = ", ")
+    })) |>
+  kable(caption = "Events scored: mean sigma in the event months and the 24 months before, prominence percentile, and signature (variables reaching |z| >= 1.5 in the padded window)")
+```
+
+```{r}
+#| label: mhw_check
+
+has_mhw <- file.exists(mhw_csv)
+if (has_mhw) {
+  d_mhw <- read_csv(mhw_csv) |> mutate(date = as_date(date))
+  d_mhw_chk <- d_mhw |>
+    inner_join(dz |> filter(var == "sst") |> select(nms, date, z_sst = z), by = c("nms", "date")) |>
+    filter(!is.na(z_sst)) |>
+    group_by(nms) |>
+    summarize(
+      n_months          = n(),
+      rho_mhw_zsst      = suppressWarnings(cor(mhw_days, z_sst, method = "spearman", use = "complete.obs")),
+      rho_mcs_negzsst   = suppressWarnings(cor(mcs_days, -z_sst, method = "spearman", use = "complete.obs")),
+      n_mhw15           = sum(mhw_days >= 15, na.rm = TRUE),
+      share_mhw15_zsst1 = if (n_mhw15 > 0) mean(z_sst[mhw_days >= 15 & !is.na(mhw_days)] >= 1) else NA_real_) |>
+    mutate(nms = factor(nms, NMS_ORD)) |>
+    arrange(nms) |>
+    mutate(nms = as.character(nms))
+  write_csv(d_mhw_chk, out("mhw_check.csv"))
+  d_mhw_chk |> mutate(across(where(is.double), \(x) round(x, 2))) |>
+    kable(caption = "Daily-SST cross-check: marine heatwave / cold-spell days (OISST) vs monthly z of sst")
+} else {
+  note("data/events/mhw_monthly.csv is absent: daily-SST cross-check skipped.")
+}
+```
+
+## 8. Basin-scale climate modes
+
+Each index (standardized over the window) is lagged 0-12 months; the lag with the largest adjusted
+R2 of an RDA of the anomalies is kept, and tested against phase-randomized surrogates of the index
+(lag re-optimized in each). A joint model with all indices at their best lags is partitioned against
+the selected eigenfunctions, and the departure is recomputed with the mode-related part removed.
+
+```{r}
+#| label: modes
+
+has_idx <- file.exists(indices_csv)
+d_mode_res <- NULL
+if (has_idx) {
+  d_idx <- read_csv(indices_csv) |>
+    mutate(date = as_date(date), index = tolower(index)) |>
+    filter(index %in% INDICES, !is.na(value)) |>
+    distinct(index, date, .keep_all = TRUE)
+  idx_present <- intersect(INDICES, unique(d_idx$index))
+  has_idx <- length(idx_present) > 0
+}
+if (!has_idx) {
+  note("data/context/indices_monthly.csv is absent (or has none of {paste(INDICES, collapse = ', ')}): climate-mode section skipped.")
+} else {
+  IDX_DATES <- seq(WIN_BEG %m-% months(max(LAGS)), WIN_END, by = "month")
+  idx_mat <- sapply(idx_present, \(i) {
+    s <- d_idx |> filter(index == i)
+    v <- s$value[match(IDX_DATES, s$date)]
+    w <- IDX_DATES >= WIN_BEG
+    (v - mean(v[w], na.rm = TRUE)) / sd(v[w], na.rm = TRUE)
+  })
+  lagged <- \(v, L) v[(max(LAGS) + 1 - L):(length(v) - L)]
+  r2_by_lag <- \(Y, v) map_dbl(LAGS, \(L) {
+    x <- lagged(v, L)
+    if (mean(!is.na(x)) < 1 - MAX_NA) NA_real_ else r2adj_fast(Y, matrix(x))
+  })
+  tibble(index = idx_present,
+         first = map_chr(idx_present, \(i) format(min(d_idx$date[d_idx$index == i]), "%Y-%m")),
+         last  = map_chr(idx_present, \(i) format(max(d_idx$date[d_idx$index == i]), "%Y-%m")),
+         `missing months in window (lag 0)` = map_int(idx_present, \(i) sum(is.na(lagged(idx_mat[, i], 0))))) |>
+    kable(caption = "Climate indices used")
+
+  # indices assigned a priori by basin
+  idx_of <- \(n) intersect(MODE_SETS[[BASIN[[n]]]], idx_present)
+  pairs  <- map_dfr(NMS_ORD, \(n) tibble(nms = n, index = idx_of(n)))
+  tibble(nms = NMS_ORD, basin = BASIN[NMS_ORD], indices = map_chr(NMS_ORD, \(n) paste(idx_of(n), collapse = ", "))) |>
+    kable(caption = glue("Indices assigned by basin; lags 0-{max(LAGS)} months (index leading)"))
+
+  modes_single_csv <- out("modes_single.csv")
+  modes_ok <- is_fresh(modes_single_csv, c(state_csv, indices_csv)) && {
+    m <- read_csv(modes_single_csv)
+    nrow(m) == nrow(pairs) && all(paste(m$nms, m$index) %in% paste(pairs$nms, pairs$index)) &&
+      all(m$lag_best <= max(LAGS)) }
+  if (!modes_ok) {
+    set.seed(777)
+    sur <- map(set_names(idx_present), \(i) replicate(N_MODE_SUR, phase_rand(idx_mat[, i])))
+    res <- mclapply(NMS_ORD, \(n) {
+      Y <- na0(Z_list[[n]]$Z)
+      map_dfr(idx_of(n), \(i) {
+        r2  <- r2_by_lag(Y, idx_mat[, i])
+        Lb  <- LAGS[which.max(r2)]
+        xb  <- lagged(idx_mat[, i], Lb)
+        mx  <- apply(sur[[i]], 2, \(v) max(r2_by_lag(Y, v), na.rm = TRUE))
+        rr  <- \(v) if (v %in% colnames(Y)) cor(xb, Y[, v], use = "complete.obs") else NA_real_
+        tibble(nms = n, index = i, lag_best = Lb, r2adj = max(r2, na.rm = TRUE),
+               r_sst = rr("sst"), r_sss = rr("sss"), r_chl = rr("chl"), p_value = p_emp(mx, max(r2, na.rm = TRUE)))
+      })
+    }, mc.cores = N_CORE)
+    stopifnot(!any(map_lgl(res, \(r) inherits(r, "try-error"))))
+    write_csv(bind_rows(res), modes_single_csv)
+  }
+  d_modes_single <- read_csv(modes_single_csv)
+
+  # joint model, variance partitioning, per-variable r2, residual departure ----
+  d_mode_res <- map(set_names(NMS_ORD), \(n) {
+    zi <- Z_list[[n]]
+    Y  <- na0(zi$Z)
+    lb <- d_modes_single |> filter(nms == n)
+    Xj <- sapply(set_names(lb$index), \(i) lagged(idx_mat[, i], lb$lag_best[lb$index == i]))
+    n_fill <- sum(is.na(Xj))
+    Xj[is.na(Xj)] <- 0
+    Xc <- sweep(Xj, 2, colMeans(Xj))
+    r2_modes <- r2adj_fast(Y, Xc)
+    ks <- d_aem_sel$k[d_aem_sel$nms == n]
+    vp <- if (length(ks) > 0) varpart(Y, Xc, E_aem[, paste0("AEM", ks), drop = FALSE])$part$indfract$Adj.R.square else rep(NA_real_, 4)
+    B  <- qr.coef(qr(cbind(1, Xc)), Y)
+    Zr <- zi$Z - Xc %*% B[-1, , drop = FALSE]
+    st <- dep_stats(Zr)
+    list(
+      # vegan's indfract order: [a] = X1|X2, [b] = X2|X1, [c] = shared, [d] = residuals
+      total = tibble(nms = n, r2adj_modes = r2_modes, modes_unique = vp[1], shared = vp[3],
+                     aem_unique = vp[2], residual = vp[4],
+                     lags = paste(glue("{lb$index}@{lb$lag_best}"), collapse = ";"), n_filled = n_fill),
+      by_var = tibble(nms = n, var = zi$vars, r2adj = map_dbl(zi$vars, \(v) r2adj_fast(Y[, v, drop = FALSE], Xc))),
+      sigma_res = st$sigma_cv,
+      e_res = st$e_per)
+  })
+  d_modes_total <- map_dfr(d_mode_res, "total")
+  stopifnot(with(d_modes_total, all(is.na(shared) | abs(modes_unique + shared - r2adj_modes) < 1e-6)))
+  d_modes_var   <- map_dfr(d_mode_res, "by_var")
+  write_csv(d_modes_total, out("modes_total.csv"))
+  write_csv(d_modes_var, out("modes_by_var.csv"))
+
+  d_modes_single |>
+    mutate(cell = glue("{round(100 * r2adj)}{if_else(p_value <= 0.05, '*', '')} (lag {lag_best})")) |>
+    select(nms, index, cell) |>
+    pivot_wider(names_from = index, values_from = cell) |>
+    left_join(d_modes_total |> transmute(nms, `joint (%)` = round(100 * r2adj_modes),
+                                         `modes only` = round(100 * modes_unique), shared = round(100 * shared),
+                                         `eigenfunctions only` = round(100 * aem_unique)), by = "nms") |>
+    mutate(nms = factor(nms, NMS_ORD)) |>
+    arrange(nms) |>
+    kable(caption = "Adjusted R2 (%) of each index at its best lag (* p <= 0.05, phase-randomized surrogates), joint model and its partition with the eigenfunctions")
+  d_modes_var |>
+    mutate(r2adj = round(100 * r2adj)) |>
+    pivot_wider(names_from = var, values_from = r2adj) |>
+    mutate(nms = factor(nms, NMS_ORD)) |>
+    arrange(nms) |>
+    kable(caption = "Adjusted R2 (%) of each variable's z on all indices at their best lags")
+}
+```
+
+```{r}
+#| label: write_departure
+
+# departure and period exceedance, with the mode-removed versions when available ----
+d_dep_out <- d_dep |>
+  mutate(sigma_res = if (!is.null(d_mode_res)) unlist(map(d_mode_res[NMS_ORD], "sigma_res")) else NA_real_) |>
+  select(nms, date, sigma, sigma_cv, exceed, d_rms, sigma_run12, exceed_run12, sigma_res)
+write_csv(d_dep_out, out("departure_monthly.csv"))
+
+d_eper_out <- d_eper |>
+  left_join(
+    if (!is.null(d_mode_res))
+      imap_dfr(d_mode_res, \(r, n) tibble(nms = n, period = PERIODS$period, e_res_pct = unname(r$e_res)))
+    else tibble(nms = character(), period = character(), e_res_pct = numeric()),
+    by = c("nms", "period")) |>
+  select(nms, period, e_pct, sigma_median, null_q50, null_q95, p_value, e_res_pct)
+write_csv(d_eper_out, out("exceedance_period.csv"))
+
+if (!is.null(d_mode_res)) {
+  d_eper_out |>
+    filter(period %in% c("2016-2020", "2021-2025")) |>
+    transmute(nms, period, cell = glue("{round(e_pct)} -> {round(e_res_pct)} ({round(null_q95)})")) |>
+    pivot_wider(names_from = period, values_from = cell) |>
+    mutate(nms = factor(nms, NMS_ORD)) |>
+    arrange(nms) |>
+    kable(caption = "Exceedance (%) before -> after removing the climate-mode part (null 95th percentile of the main analysis in brackets)")
+}
+```
+
+## 9. Dated shifts (supporting)
+
+E-divisive change points on the annual mean anomalies (first year of each new segment). Known
+product changes to keep in mind when reading them: GLORYS12 atmospheric forcing change in 2019 and
+the switch to the interim stream in 2021; ocean-color sensor changes in the merged chlorophyll
+record in 2012 (VIIRS), 2016 and 2018 (OLCI-A, OLCI-B) and 2023. Nearly every year from 2011 to 2024
+is within a year of one of these, so no per-shift flag is given.
+
+```{r}
+#| label: shifts
+
+shifts_csv <- out("shifts.csv")
+if (!is_fresh(shifts_csv) || !identical(names(read_csv(shifts_csv, n_max = 1)), c("nms", "year")) ||
+    !all(read_csv(shifts_csv)$nms %in% NMS_ORD)) {
+  res <- mclapply(NMS_ORD, \(n) {
+    set.seed(seed_of(n, 2))
+    X  <- as.matrix(ann_z[ann_z$nms == n, Z_list[[n]]$vars])
+    yr <- ann_z$year[ann_z$nms == n]
+    i  <- e.divisive(X, sig.lvl = 0.05, R = 499, min.size = 3)$estimates
+    i  <- i[i > 1 & i <= nrow(X)]
+    tibble(nms = rep(n, length(i)), year = as.integer(yr[i]))
+  }, mc.cores = N_CORE)
+  stopifnot(!any(map_lgl(res, \(r) inherits(r, "try-error"))))
+  bind_rows(res) |> write_csv(shifts_csv)
+}
+d_shifts <- read_csv(shifts_csv, col_types = "ci")
+tibble(nms = NMS_ORD) |>
+  left_join(d_shifts |> group_by(nms) |>
+              summarize(`shift years (first year of new segment)` = paste(year, collapse = ", ")),
+            by = "nms") |>
+  kable(caption = "E-divisive shifts on annual means")
+```
+
+## 10. Sensitivity
+
+The full scoring (standardization, envelope, exceedance) is rerun under alternative choices.
+
+```{r}
+#| label: sensitivity
+
+variant_e <- function(d_long, vars, base_beg = BASE_BEG, base_end = BASE_END, thr = SIGMA_THR, win_beg = WIN_BEG) {
+  dates <- seq(win_beg, WIN_END, by = "month")
+  yr    <- year(dates)
+  is_b  <- dates >= base_beg & dates <= base_end
+  dzv   <- standardize(d_long |> filter(var %in% vars), base_beg, base_end) |>
+    filter(date >= win_beg, date <= WIN_END)
+  map_dfr(NMS_ORD, \(n) {
+    zi <- build_Z(dzv, n, vars, is_b, dates)
+    if (ncol(zi$Z) < 2) return(NULL)
+    ex <- score_departure(zi$Z, is_b, yr)$sigma_cv > thr
+    tibble(
+      nms         = n,
+      e_2016_2020 = 100 * mean(ex[between(yr, 2016, 2020)], na.rm = TRUE),
+      e_2021_2025 = 100 * mean(ex[between(yr, 2021, 2025)], na.rm = TRUE))
+  })
+}
+read_occci <- \() read_csv(occci_csv) |> mutate(date = as_date(date)) |> select(nms, date, chl_occci)
+swap_var <- \(d, from, to) d |> filter(var != to) |> mutate(var = if_else(var == from, to, var))
+
+variants <- list(
+  main               = \() variant_e(d_state, VARS),
+  baseline_2006_2015 = \() variant_e(d_state, VARS, as_date("2006-01-01"), as_date("2015-12-01")),
+  thr3               = \() variant_e(d_state, VARS, thr = 3),
+  with_pp            = \() if ("pp" %in% d_state$var) variant_e(d_state, c(VARS, "pp")) else NULL,
+  unmasked           = \() if (all(c("sbt_all", "chl_all") %in% d_state$var))
+    variant_e(d_state |> swap_var("sbt_all", "sbt") |> swap_var("chl_all", "chl"), VARS) else NULL,
+  no_chl             = \() variant_e(d_state, setdiff(VARS, "chl")),
+  occci              = \() {
+    if (!file.exists(occci_csv)) return(NULL)
+    d_state |>
+      left_join(read_occci(), by = c("nms", "date")) |>
+      mutate(value = if_else(var == "chl", if_else(!is.na(value) & !is.na(chl_occci), chl_occci, NA_real_), value)) |>
+      select(-chl_occci) |>
+      variant_e(VARS)
+  },
+  # 1998-01..2025-09 with a 1998-2012 baseline; chlorophyll from oc-cci (the only record spanning it consistently)
+  long_baseline      = \() {
+    if (!file.exists(occci_csv)) return(NULL)
+    d_state |>
+      filter(var != "chl") |>
+      bind_rows(read_occci() |> transmute(nms, date, var = "chl", value = chl_occci)) |>
+      variant_e(VARS, as_date("1998-01-01"), as_date("2012-12-01"), win_beg = as_date("1998-01-01"))
+  })
+d_sens <- imap_dfr(variants, \(f, v) { r <- f(); if (is.null(r)) NULL else mutate(r, variant = v) }) |>
+  select(nms, variant, e_2016_2020, e_2021_2025)
+missing_variants <- setdiff(names(variants), unique(d_sens$variant))
+if (length(missing_variants) > 0) note("sensitivity variants skipped (input absent): {paste(missing_variants, collapse = ', ')}")
+
+# the main variant must reproduce section 4 exactly
+chk_main <- d_sens |> filter(variant == "main") |>
+  left_join(d_eper |> filter(period == "2021-2025") |> select(nms, e_pct), by = "nms")
+stopifnot(max(abs(chk_main$e_2021_2025 - chk_main$e_pct)) < 1e-9)
+write_csv(d_sens, out("sensitivity.csv"))
+
+d_season <- d_dep |>
+  mutate(
+    yr = year(date), mo = month(date),
+    season = case_when(mo %in% c(12, 1, 2) ~ "DJF", mo %in% 3:5 ~ "MAM", mo %in% 6:8 ~ "JJA", TRUE ~ "SON")) |>
+  cross_join(PERIODS) |>
+  filter(yr >= y0, yr <= y1) |>
+  group_by(nms, season, period) |>
+  summarize(e_pct = 100 * mean(exceed, na.rm = TRUE)) |>
+  ungroup() |>
+  arrange(factor(nms, NMS_ORD), factor(season, SEASONS), factor(period, PERIODS$period))
+write_csv(d_season, out("exceedance_season.csv"))
+
+d_sens |>
+  mutate(cell = glue("{round(e_2016_2020)} / {round(e_2021_2025)}")) |>
+  select(nms, variant, cell) |>
+  pivot_wider(names_from = variant, values_from = cell) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Exceedance (%) 2016-2020 / 2021-2025 under each variant")
+d_season |>
+  filter(period == "2021-2025") |>
+  mutate(e_pct = round(e_pct)) |>
+  pivot_wider(names_from = season, values_from = e_pct) |>
+  select(-period) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  kable(caption = "Exceedance (%) in 2021-2025 by season")
+```
+
+### Red-noise reference for the eigenfunction model
+
+The same selection pipeline on `r N_AEM_NULL` red-noise series per sanctuary (VAR(1) of section 3,
+`nperm = ` `r NPERM_AEM_NULL`), to show how much adjusted R2, and how much "trend-like" R2,
+persistence alone produces. The specification asks for 99 series; one selection on a persistent
+series takes 10-30 s, so 99 x 13 would take about 45 minutes and the reference was cut to
+`r N_AEM_NULL` series per sanctuary (the "95th percentile" is then close to the maximum).
+
+```{r}
+#| label: aem_null
+
+aem_null_csv <- out("aem_null.csv")
+if (!is_fresh(aem_null_csv)) {
+  n_blk <- 3
+  jobs  <- expand_grid(nms = NMS_ORD, blk = seq_len(n_blk))
+  res <- mclapply(seq_len(nrow(jobs)), \(j) {
+    n   <- jobs$nms[j]
+    set.seed(seed_of(n, 100 + jobs$blk[j]))
+    reps <- seq(jobs$blk[j], N_AEM_NULL, by = n_blk)
+    map_dfr(reps, \(r) {
+      sel <- fit_aem_sel(restd(sim_var1(var1_fits[[n]])), E_aem, nperm = NPERM_AEM_NULL)
+      tibble(nms = n, rep = r, total = sum(sel$r2adj_increment),
+             trend = sum(sel$r2adj_increment[band_of(period_of_k(sel$k)) == "trend-like"]))
+    })
+  }, mc.cores = N_CORE)
+  stopifnot(!any(map_lgl(res, \(r) inherits(r, "try-error"))))
+  d_an <- bind_rows(res)
+  stopifnot(nrow(d_an) == N_AEM_NULL * length(NMS_ORD))
+  d_an |>
+    pivot_longer(c(total, trend), names_to = "stat") |>
+    mutate(stat = recode(stat, total = "r2adj_total", trend = "r2adj_trend")) |>
+    group_by(nms, stat) |>
+    summarize(q50 = quantile(value, 0.5), q95 = quantile(value, 0.95)) |>
+    ungroup() |>
+    arrange(factor(nms, NMS_ORD)) |>
+    write_csv(aem_null_csv)
+}
+d_aem_null <- read_csv(aem_null_csv)
+
+d_aem_tot |>
+  select(nms, total = r2adj) |>
+  left_join(d_aem_bands |> filter(band == "trend-like") |> select(nms, trend = r2adj), by = "nms") |>
+  left_join(d_aem_null |> mutate(q = glue("{round(100 * q50)} / {round(100 * q95)}")) |>
+              select(nms, stat, q) |> pivot_wider(names_from = stat, values_from = q), by = "nms") |>
+  mutate(total = round(100 * total), trend = round(100 * trend)) |>
+  select(nms, `total (%)` = total, `null total, median / 95th` = r2adj_total,
+         `trend-like (%)` = trend, `null trend-like, median / 95th` = r2adj_trend) |>
+  kable(caption = "Observed eigenfunction-model adjusted R2 vs red noise with the same persistence")
+```
+
+## 11. Scorecard
+
+```{r}
+#| label: scorecard
+
+wide_var <- function(d, col, prefix) {
+  w <- d |> select(nms, var, value = all_of(col)) |>
+    pivot_wider(names_from = var, values_from = value, names_prefix = prefix)
+  for (v in paste0(prefix, VARS)) if (!v %in% names(w)) w[[v]] <- NA
+  w |> select(nms, all_of(paste0(prefix, VARS)))
+}
+sh25 <- d_shift |> filter(period == "2021-2025")
+ep   <- \(p, col = "e_pct") d_eper_out |> filter(period == p) |> select(nms, all_of(col)) |> deframe()
+
+d_score <- NMS_LUT |>
+  mutate(
+    p                  = P_OF[nms],
+    e_base_cv          = ep("base")[nms],
+    e_2013_2015        = ep("2013-2015")[nms],
+    e_2016_2020        = ep("2016-2020")[nms],
+    e_2021_2025        = ep("2021-2025")[nms],
+    null_q95_2021_2025 = ep("2021-2025", "null_q95")[nms],
+    p_2021_2025        = ep("2021-2025", "p_value")[nms]) |>
+  left_join(d_status |> select(nms, status, delta, trend, form, first_period_outside), by = "nms") |>
+  left_join(wide_var(sh25, "mean_z", "mean_z_"), by = "nms") |>
+  left_join(wide_var(sh25, "sig", "sig_"), by = "nms") |>
+  left_join(wide_var(sh25, "sig_mean", "sig_mean_"), by = "nms") |>
+  left_join(d_aem_tot |> select(nms, r2adj_aem = r2adj), by = "nms") |>
+  left_join(
+    d_aem_bands |>
+      mutate(band = recode(band, `trend-like` = "r2_trend", decadal = "r2_decadal",
+                           interannual = "r2_interannual", `sub-annual` = "r2_subannual")) |>
+      pivot_wider(names_from = band, values_from = r2adj),
+    by = "nms") |>
+  mutate(
+    r2adj_modes     = if (exists("d_modes_total")) d_modes_total$r2adj_modes[match(nms, d_modes_total$nms)] else NA_real_,
+    e_res_2021_2025 = ep("2021-2025", "e_res_pct")[nms]) |>
+  left_join(
+    d_ev_scored |>
+      group_by(nms) |>
+      summarize(
+        n_events                = n(),
+        n_resolvable            = sum(resolvable %in% TRUE),
+        n_registered_resolvable = sum(resolvable %in% TRUE & registered %in% TRUE)),
+    by = "nms") |>
+  mutate(across(c(n_events, n_resolvable, n_registered_resolvable), \(x) replace_na(x, 0L))) |>
+  select(
+    nms, name, region, p, e_base_cv, e_2013_2015, e_2016_2020, e_2021_2025, null_q95_2021_2025,
+    p_2021_2025, status, delta, trend, form, first_period_outside, all_of(paste0("mean_z_", VARS)),
+    all_of(paste0("sig_", VARS)), all_of(paste0("sig_mean_", VARS)), r2adj_aem, r2_trend, r2_decadal, r2_interannual, r2_subannual,
+    r2adj_modes, e_res_2021_2025, n_events, n_resolvable, n_registered_resolvable)
+write_csv(d_score, out("scorecard.csv"))
+
+top2 <- sh25 |>
+  group_by(nms) |>
+  slice_max(abs(mean_z), n = 2, with_ties = FALSE) |>
+  summarize(`largest shifts` = paste(sprintf("%s %+.1f%s", var, mean_z, if_else(sig_mean, "†", "")), collapse = ", "))
+d_score |>
+  left_join(top2, by = "nms") |>
+  transmute(
+    nms, base = round(e_base_cv), `13-15` = round(e_2013_2015), `16-20` = round(e_2016_2020),
+    `21-25` = round(e_2021_2025), `null q95` = round(null_q95_2021_2025), status, trend, form,
+    `first outside` = first_period_outside, `largest shifts`, `AEM R2` = round(100 * r2adj_aem)) |>
+  kable(caption = "Scorecard (exceedance in % of months beyond 2 sigma)")
+```
+
+## Checks
+
+```{r}
+#| label: checks
+
+schemas <- list(
+  z_monthly.csv            = c("nms", "date", "var", "value", "x", "z"),
+  z_temp_1993.csv          = c("nms", "date", "var", "value", "x", "z"),
+  departure_monthly.csv    = c("nms", "date", "sigma", "sigma_cv", "exceed", "d_rms", "sigma_run12", "exceed_run12", "sigma_res"),
+  null_exceedance.csv      = c("nms", "period", "q50", "q95", "q99"),
+  null_var.csv             = c("nms", "var", "period", "q95_share", "q025_mean", "q975_mean"),
+  exceedance_period.csv    = c("nms", "period", "e_pct", "sigma_median", "null_q50", "null_q95", "p_value", "e_res_pct"),
+  exceedance_annual.csv    = c("nms", "year", "e_pct", "sigma_mean", "n_months"),
+  shift_by_var.csv         = c("nms", "var", "period", "mean_z", "share_hi", "share_lo", "null_q95_share", "sig",
+                               "null_q025_mean", "null_q975_mean", "sig_mean"),
+  aem_selected.csv         = c("nms", "k", "period_yr", "band", "r2adj_increment", "p_value"),
+  aem_bands.csv            = c("nms", "band", "r2adj"),
+  aem_total.csv            = c("nms", "r2adj", "n_selected", "p"),
+  fitted_monthly.csv       = c("nms", "date", "var", "z_fit"),
+  aem_null.csv             = c("nms", "stat", "q50", "q95"),
+  pca_loadings.csv         = c("var", "pc1", "pc2", "pc3"),
+  pca_scores_annual.csv    = c("nms", "year", "pc1", "pc2", "pc3"),
+  pca_scores_fit.csv       = c("nms", "date", "pc1", "pc2"),
+  pca_baseline_ellipse.csv = c("nms", "pc1", "pc2"),
+  events_test.csv          = c("group", "n", "hit_rate", "null_mean", "null_q95", "p_value"),
+  shifts.csv               = c("nms", "year"),
+  sensitivity.csv          = c("nms", "variant", "e_2016_2020", "e_2021_2025"),
+  exceedance_season.csv    = c("nms", "season", "period", "e_pct"))
+if (has_mhw) schemas$mhw_check.csv <- c("nms", "n_months", "rho_mhw_zsst", "rho_mcs_negzsst", "n_mhw15", "share_mhw15_zsst1")
+if (has_idx) {
+  schemas$modes_single.csv <- c("nms", "index", "lag_best", "r2adj", "r_sst", "r_sss", "r_chl", "p_value")
+  schemas$modes_total.csv  <- c("nms", "r2adj_modes", "modes_unique", "shared", "aem_unique", "residual", "lags", "n_filled")
+  schemas$modes_by_var.csv <- c("nms", "var", "r2adj")
+}
+n_nms <- length(NMS_ORD)
+n_var_used <- sum(P_OF)
+rows_expected <- list(
+  departure_monthly.csv    = n_nms * N_WIN,
+  null_exceedance.csv      = n_nms * nrow(PERIODS),
+  null_var.csv             = n_var_used * nrow(PERIODS_VAR),
+  exceedance_period.csv    = n_nms * nrow(PERIODS),
+  exceedance_annual.csv    = n_nms * length(YEARS),
+  shift_by_var.csv         = n_var_used * 2,
+  aem_bands.csv            = n_nms * length(BANDS),
+  aem_total.csv            = n_nms,
+  fitted_monthly.csv       = n_var_used * N_WIN,
+  aem_null.csv             = n_nms * 2,
+  pca_loadings.csv         = length(VARS) + 1,
+  pca_scores_annual.csv    = n_nms * length(YEARS),
+  pca_scores_fit.csv       = n_nms * N_WIN,
+  pca_baseline_ellipse.csv = n_nms * 101,
+  events_test.csv          = 2,
+  exceedance_season.csv    = n_nms * length(SEASONS) * nrow(PERIODS),
+  scorecard.csv            = n_nms)
+if (has_idx) rows_expected$modes_total.csv <- n_nms
+
+d_chk <- imap_dfr(schemas, \(cols, f) {
+  d <- read_csv(out(f), col_types = cols(.default = "c"))
+  tibble(file = f, rows = nrow(d), schema_ok = identical(names(d), cols),
+         rows_ok = is.null(rows_expected[[f]]) || nrow(d) == rows_expected[[f]])
+})
+d_chk <- bind_rows(d_chk, tibble(
+  file = "scorecard.csv", rows = nrow(read_csv(out("scorecard.csv"))),
+  schema_ok = ncol(read_csv(out("scorecard.csv"))) == 43, rows_ok = rows == n_nms))
+kable(d_chk, caption = "Schema and row-count checks of the files written")
+stopifnot(all(d_chk$schema_ok), all(d_chk$rows_ok))
+
+# content checks
+stopifnot(
+  !anyNA(d_dep_out$sigma_cv), !anyNA(d_dep_out$exceed),
+  all(d_eper_out$p_value > 0 & d_eper_out$p_value <= 1),
+  all(abs(colSums(d_load[1:6, -1]^2) - 1) < 1e-9),
+  abs(sum(pc$sdev^2 / sum(pc$sdev^2)) - 1) < 1e-9,
+  all(d_score$status %in% c("outside", "within")),
+  all(d_score$trend %in% c("increasing", "steady", "decreasing")),
+  all(!is.na(d_score$form)),
+  nrow(read_csv(out("z_monthly.csv"))) == nrow(dz),
+  all(c("exceed_any", "sigma_event", "sigma_before", "prominence", "pct_prom", "registered") %in%
+        names(read_csv(out("events_scored.csv")))),
+  setequal(d_score$nms, NMS_ORD))
+cat(glue("Render time: {round(as.numeric(difftime(Sys.time(), t_start, units = 'mins')), 1)} min"), "\n")
+```
+
+## Session info
+
+```{r}
+#| label: session
+
+sessionInfo()
+```
