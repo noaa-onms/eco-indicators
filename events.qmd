@@ -1,0 +1,515 @@
+---
+title: "Event layer: marine heatwaves, coral heat stress and tropical cyclones"
+subtitle: "Independent ground truth for the 14-sanctuary trajectory analysis"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    code-tools: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: true
+editor_options:
+  chunk_output_type: console
+---
+
+The monthly state variables of the manuscript come from a reanalysis. This notebook builds a layer of
+events that is **independent** of it and is already used by managers: marine heatwave categories
+(daily satellite SST), coral bleaching heat stress (NOAA Coral Reef Watch) and named storms (IBTrACS).
+Every download is cached under `data/events/` or `data/raw/` and skipped when present, so the notebook
+re-renders offline.
+
+```{r}
+#| label: setup
+
+librarian::shelf(
+  dplyr, ggplot2, glue, heatwaveR, here, httr2, knitr, lubridate, ncdf4, purrr, readr,
+  scales, sf, stringr, tibble, tidyr,
+  quiet = T)
+options(readr.show_col_types = F)
+
+# paths ----
+dir_ev     <- here("data/events")
+dir_oisst  <- file.path(dir_ev, "oisst")   # kept: OCNMS cross-check only
+dir_raw    <- here("data/raw")
+dir_fig    <- here("figures/events")
+sanc_geo   <- here("data/sanctuaries.geojson")
+pnms_geo   <- here("data/state/pnms.geojson")   # Papahanaumokuakea (not in sanctuaries.geojson)
+for (d in c(file.path(dir_raw, "crw"), file.path(dir_raw, "ibtracs"), dir_fig))
+  dir.create(d, showWarnings = F, recursive = T)
+mhw_events_csv  <- file.path(dir_ev, "mhw_events.csv")
+mhw_monthly_csv <- file.path(dir_ev, "mhw_monthly.csv")
+mhw_annual_csv  <- file.path(dir_ev, "mhw_annual.csv")
+dhw_monthly_csv <- file.path(dir_ev, "dhw_monthly.csv")
+dhw_annual_csv  <- file.path(dir_ev, "dhw_annual.csv")
+storms_csv      <- file.path(dir_ev, "storms.csv")
+
+# constants ----
+OSTIA_ID    <- "METOFFICE-GLO-SST-L4-REP-OBS-SST"
+SST_START <- as.Date("1982-01-01")
+CLIM_PERIOD <- c("1983-01-01", "2012-12-31")
+STORM_KM    <- 150
+STORM_YEAR  <- 1993
+NMS_ORD <- c(
+  "OCNMS", "GFNMS", "CBNMS", "MBNMS", "CPNMS", "CINMS", "PNMS", "HIHWNMS", "NMSAS",
+  "FGBNMS", "FKNMS", "GRNMS", "MNMS", "SBNMS")
+CORAL_NMS <- c("PNMS", "HIHWNMS", "NMSAS", "FGBNMS", "FKNMS")
+
+# plot theme (as trajectory_checks.qmd) ----
+PAL <- list(
+  surface = "#fcfcfb", ink = "#0b0b0b", ink2 = "#52514e", muted = "#898781",
+  grid    = "#e1e0d9", axis = "#c3c2b7", blue = "#2a78d6", orange = "#eb6834")
+PAL_SEQ <- c("#f0efec", "#f3b3ad", "#eb6834", "#e34948", "#8f1d1c")
+theme_chk <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background    = element_rect(fill = PAL$surface, color = NA),
+      panel.background   = element_rect(fill = PAL$surface, color = NA),
+      panel.grid.major   = element_line(color = PAL$grid, linewidth = 0.25),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = PAL$muted),
+      axis.title         = element_text(color = PAL$ink2),
+      plot.title         = element_text(color = PAL$ink, face = "bold", size = rel(1.1)),
+      plot.subtitle      = element_text(color = PAL$ink2),
+      plot.caption       = element_text(color = PAL$muted, hjust = 0),
+      plot.title.position = "plot",
+      legend.position    = "top",
+      legend.justification = "left",
+      legend.title       = element_text(color = PAL$ink2),
+      legend.text        = element_text(color = PAL$ink2))
+}
+save_fig <- function(p, name, width = 9, height = 5) {
+  ggsave(file.path(dir_fig, name), p, width = width, height = height, dpi = 200, bg = PAL$surface)
+  p
+}
+
+# download with retries and a polite pause ----
+fetch <- function(url, path, tries = 5, pause = 1) {
+  request(url) |>
+    req_timeout(600) |>
+    req_retry(max_tries = 8, is_transient = \(r) resp_status(r) %in% c(408, 429, 500, 502, 503, 504), backoff = \(i) 10 * i) |>
+    req_perform(path = path)
+  Sys.sleep(pause)
+  invisible(path)
+}
+
+# sanctuaries, ordered ----
+sf_use_s2(FALSE)
+sanc <- bind_rows(
+  read_sf(sanc_geo) |> select(nms),
+  read_sf(pnms_geo) |> select(nms)) |>
+  filter(nms %in% NMS_ORD) |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms) |>
+  group_by(nms) |>
+  summarize(geometry = st_union(geometry), .groups = "drop") |>
+  st_make_valid()
+stopifnot(nrow(sanc) == 14)
+```
+
+## Part 1: marine heatwaves and cold spells
+
+Source: Copernicus Marine `SST_GLO_SST_L4_REP_OBSERVATIONS_010_011`, dataset `r OSTIA_ID`
+(OSTIA reprocessed daily foundation SST analysis, 0.05°, variable `analysed_sst`; Good et al. 2020,
+[doi:10.3390/rs12040720](https://doi.org/10.3390/rs12040720)), 1982-01-01 to 2026-03-31.
+Per sanctuary: the daily mean (converted to °C) of grid cells whose centres fall inside the polygon
+(Papahanaumokuakea, PNMS, at 1.5 million km2 is instead sampled on a regular 1 degree lattice of OSTIA cells inside the polygon, cos(latitude)-weighted; `n_cells` is the lattice count. Buffered by 10 km for Monitor, Gray's Reef and Flower Garden Banks, as for the state variables); if none,
+the cell nearest the polygon centroid. Events follow Hobday et al. (2016, 2018) via `heatwaveR`
+(climatology `r CLIM_PERIOD[1]` to `r CLIM_PERIOD[2]`, 90th percentile for heatwaves, 10th for cold spells).
+
+```{r}
+#| label: sst
+
+OSTIA_END <- "2026-03-31"
+dir_ostia <- file.path(dir_raw, "ostia")
+dir_sst   <- file.path(dir_ev, "sst_daily")
+dir.create(dir_ostia, showWarnings = F, recursive = T)
+dir.create(dir_sst, showWarnings = F, recursive = T)
+CMT <- path.expand("~/.virtualenvs/CopernicusMarine/bin/copernicusmarine")
+
+# polygon (buffered 10 km for the three shelf sanctuaries) ----
+geom_for <- \(code) {
+  g <- sanc$geometry[sanc$nms == code]
+  if (code %in% c("MNMS", "GRNMS", "FGBNMS")) {
+    sf_use_s2(TRUE); g <- st_buffer(g, 10000); sf_use_s2(FALSE)
+  }
+  g
+}
+
+# one subset request per sanctuary (credentials come from the toolbox config) ----
+get_ostia_nc <- \(code) {
+  f <- file.path(dir_ostia, glue("{code}.nc"))
+  if (file.exists(f)) return(f)
+  b <- st_bbox(geom_for(code))
+  system2(CMT, c(
+    "subset", "-i", OSTIA_ID, "-v", "analysed_sst",
+    "--minimum-longitude", b["xmin"] - 0.15, "--maximum-longitude", b["xmax"] + 0.15,
+    "--minimum-latitude",  b["ymin"] - 0.15, "--maximum-latitude",  b["ymax"] + 0.15,
+    "-t", glue("{SST_START}T00:00:00"), "-T", glue("{OSTIA_END}T00:00:00"),
+    "-s", "arco-time-series", "-o", dir_ostia, "-f", glue("{code}.nc"),
+    "--overwrite", "--disable-progress-bar"), stdout = F, stderr = F)
+  f
+}
+
+# daily polygon mean from the netcdf ----
+build_sst_daily <- \(code) {
+  if (code == "PNMS") return(build_sst_pnms())
+  g  <- geom_for(code)
+  nc <- nc_open(get_ostia_nc(code))
+  on.exit(nc_close(nc))
+  lo <- as.vector(ncvar_get(nc, "longitude")); la <- as.vector(ncvar_get(nc, "latitude"))
+  tt <- as.Date(as.POSIXct(as.vector(ncvar_get(nc, "time")), origin = "1981-01-01", tz = "UTC"))
+  cells <- expand_grid(lat = la, lon = lo)
+  pts   <- st_as_sf(cells, coords = c("lon", "lat"), crs = 4326, remove = F)
+  inside <- lengths(st_intersects(pts, g)) > 0
+  if (!any(inside)) inside <- seq_len(nrow(cells)) == which.min(as.numeric(st_distance(pts, st_centroid(g))))
+  mask <- matrix(inside, nrow = length(lo), ncol = length(la))   # expand_grid(lat, lon): lon fastest
+  idx  <- split(seq_along(tt), ceiling(seq_along(tt) / 2000))
+  map(idx, \(i) {
+    a <- ncvar_get(nc, "analysed_sst", start = c(1, 1, min(i)), count = c(-1, -1, length(i)), collapse_degen = F)
+    m <- matrix(a, nrow = length(lo) * length(la))[as.vector(mask), , drop = F]
+    tibble(date = tt[i], sst = round(colMeans(m, na.rm = T) - 273.15, 3), n_valid = colSums(!is.na(m)))
+  }) |> list_rbind() |>
+    filter(n_valid > 0) |>
+    transmute(date, sst, n_cells = max(n_valid))
+}
+
+# PNMS (1.5 million km2): regular 1-degree lattice of points inside the polygon, one single-cell request
+# per point (cached in data/raw/ostia/pnms/); cos(latitude)-weighted mean, n_cells = lattice cells ----
+build_sst_pnms <- \(code = "PNMS") {
+  g   <- sanc$geometry[sanc$nms == "PNMS"]
+  lat <- 19:32
+  lon <- c(178:179, -180:-161)
+  p   <- expand_grid(lon = lon, lat = lat)
+  sf_use_s2(TRUE)
+  p   <- p[lengths(st_intersects(st_as_sf(p, coords = c("lon", "lat"), crs = 4326), st_make_valid(g))) > 0, ]
+  sf_use_s2(FALSE)
+  d <- pmap(p, \(lon, lat) {
+    f <- file.path(dir_ostia, "pnms", glue("pt_{lon}_{lat}.nc"))
+    if (!file.exists(f)) {
+      system2(CMT, c(
+        "subset", "-i", OSTIA_ID, "-v", "analysed_sst",
+        "--minimum-longitude", lon, "--maximum-longitude", lon,
+        "--minimum-latitude", lat, "--maximum-latitude", lat,
+        "-t", glue("{SST_START}T00:00:00"), "-T", glue("{OSTIA_END}T00:00:00"),
+        "-s", "arco-time-series", "-o", dirname(f), "-f", basename(f),
+        "--overwrite", "--disable-progress-bar"), stdout = F, stderr = F)
+    }
+    nc <- nc_open(f); on.exit(nc_close(nc))
+    tibble(
+      date = as.Date(as.POSIXct(as.vector(ncvar_get(nc, "time")), origin = "1981-01-01", tz = "UTC")),
+      sst  = as.vector(ncvar_get(nc, "analysed_sst")) - 273.15,
+      w    = cos(lat * pi / 180))
+  }) |> list_rbind() |> filter(!is.na(sst))
+  d |>
+    group_by(date) |>
+    summarize(n = n(), sst = round(sum(sst * w) / sum(w), 3), .groups = "drop") |>
+    transmute(date, sst, n_cells = max(n))
+}
+
+for (code in NMS_ORD) {
+  f <- file.path(dir_sst, glue("{code}.csv"))
+  if (!file.exists(f)) build_sst_daily(code) |> write_csv(f)
+}
+NMS_PRESENT <- NMS_ORD
+sst_daily <- map(NMS_ORD, \(code) read_csv(file.path(dir_sst, glue("{code}.csv"))) |> mutate(nms = code, .before = 1)) |>
+  list_rbind() |>
+  mutate(nms = factor(nms, NMS_ORD))
+sst_daily |>
+  group_by(nms) |>
+  summarize(n_cells = max(n_cells), first = min(date), last = max(date), days = n()) |>
+  kable(caption = "OSTIA daily series per sanctuary (cells with data).")
+oisst <- sst_daily
+```
+
+```{r}
+#| label: mhw
+
+# detect events per sanctuary ----
+detect <- function(d, cold = F) {
+  clim <- ts2clm(
+    d |> transmute(t = date, temp = sst),
+    climatologyPeriod = CLIM_PERIOD, pctile = if (cold) 10 else 90)
+  det <- detect_event(clim, coldSpells = cold)
+  list(clim = det$climatology, event = det$event)
+}
+
+res <- map(NMS_PRESENT, \(code) {
+  d  <- oisst |> filter(nms == code) |> arrange(date) |> select(date, sst)
+  h  <- detect(d)
+  cs <- detect(d, cold = T)
+  # hobday 2018 category: floor((temp - seas) / (thresh - seas)), capped at IV (daily, within events)
+  hd <- h$clim |>
+    mutate(cat = if_else(event, pmin(4, floor((temp - seas) / (thresh - seas))), 0)) |>
+    transmute(date = t, mhw = event %in% T, cat = replace_na(cat, 0))
+  cd <- cs$clim |> transmute(date = t, mcs = event %in% T)
+  # event category from heatwaveR::category (text I-IV)
+  cat_ev <- category(list(climatology = h$clim, event = h$event), climatology = F, S = T) |>
+    transmute(event_no, category = str_extract(as.character(category), "^[IV]+"))
+  ev <- bind_rows(
+    h$event |> mutate(kind = "mhw") |> left_join(cat_ev, by = "event_no"),
+    cs$event |> mutate(kind = "mcs", category = NA_character_)) |>
+    transmute(
+      nms = code, kind, date_start, date_peak, date_end, duration,
+      intensity_max = round(intensity_max, 3), intensity_cumulative = round(intensity_cumulative, 3),
+      category)
+  list(events = ev, daily = hd |> left_join(cd, by = "date") |> mutate(nms = code))
+})
+events <- map(res, "events") |> list_rbind() |> mutate(nms = factor(nms, NMS_ORD)) |> arrange(nms, kind, date_start)
+daily  <- map(res, "daily")  |> list_rbind() |>
+  left_join(oisst |> mutate(nms = as.character(nms)) |> select(nms, date, sst), by = c("nms", "date"))
+
+# monthly and annual ----
+mhw_monthly <- daily |>
+  mutate(date = floor_date(date, "month")) |>
+  group_by(nms, date) |>
+  summarize(
+    mhw_days = sum(mhw), mcs_days = sum(mcs, na.rm = T), mhw_max_cat = as.integer(max(cat)),
+    sst_daily = round(mean(sst, na.rm = T), 3), .groups = "drop") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms, date)
+
+ev_year <- events |>
+  filter(kind == "mhw") |>
+  mutate(year = year(date_peak)) |>
+  group_by(nms, year) |>
+  summarize(mhw_events = n(), mhw_cum_intensity = round(sum(intensity_cumulative), 2), .groups = "drop")
+mhw_annual <- mhw_monthly |>
+  mutate(year = year(date)) |>
+  group_by(nms, year) |>
+  summarize(
+    mhw_days = sum(mhw_days), mcs_days = sum(mcs_days), mhw_max_cat = max(mhw_max_cat), .groups = "drop") |>
+  left_join(ev_year, by = c("nms", "year")) |>
+  mutate(
+    mhw_events        = replace_na(mhw_events, 0L),
+    mhw_cum_intensity = replace_na(mhw_cum_intensity, 0)) |>
+  select(nms, year, mhw_days, mcs_days, mhw_events, mhw_max_cat, mhw_cum_intensity)
+
+events      |> write_csv(mhw_events_csv)
+mhw_monthly |> write_csv(mhw_monthly_csv)
+mhw_annual  |> write_csv(mhw_annual_csv)
+```
+
+Heatwave days by decade (days with SST above the local 90th percentile threshold, in events of 5+ days):
+
+```{r}
+#| label: tbl-decade
+
+mhw_annual |>
+  mutate(decade = glue("{floor(year / 10) * 10}s")) |>
+  group_by(nms, decade) |>
+  summarize(days = sum(mhw_days), .groups = "drop") |>
+  pivot_wider(names_from = decade, values_from = days) |>
+  kable(caption = "Total marine heatwave days by decade (1980s from 1982; 2020s to the latest day).")
+```
+
+```{r}
+#| label: tbl-top-years
+
+mhw_annual |>
+  group_by(nms) |>
+  slice_max(mhw_days, n = 3, with_ties = F) |>
+  summarize(top_years = paste0(year, " (", mhw_days, " d, cat ", mhw_max_cat, ")", collapse = "; ")) |>
+  kable(caption = "Three years with the most heatwave days per sanctuary.")
+```
+
+```{r}
+#| label: fig-mhw-annual
+#| fig-height: 4.5
+
+p <- mhw_annual |>
+  mutate(nms = factor(nms, rev(NMS_ORD))) |>
+  ggplot(aes(year, nms, fill = mhw_days)) +
+  geom_tile(color = PAL$surface) +
+  scale_fill_gradientn(colors = PAL_SEQ, name = "heatwave days / yr") +
+  scale_x_continuous(expand = c(0, 0), breaks = seq(1985, 2025, 5)) +
+  labs(x = NULL, y = NULL, title = "Annual marine heatwave days by sanctuary",
+       caption = "OSTIA reprocessed daily SST; Hobday et al. climatology 1983-2012.") +
+  theme_chk()
+save_fig(p, "mhw_annual_days.png", 9, 4.5)
+```
+
+### Cross-check against OISST (Olympic Coast)
+
+The earlier OISST v2.1 (0.25°) series for Olympic Coast is kept as a sanity check of the OSTIA-based events.
+
+```{r}
+#| label: oisst-check
+
+o <- read_csv(file.path(dir_oisst, "OCNMS.csv")) |> transmute(date, sst)
+n <- sst_daily |> filter(nms == "OCNMS") |> transmute(date, sst)
+anom <- \(d) ts2clm(d |> transmute(t = date, temp = sst), climatologyPeriod = CLIM_PERIOD) |>
+  transmute(date = t, anom = temp - seas)
+both <- inner_join(anom(o), anom(n), by = "date", suffix = c("_oisst", "_ostia")) |> drop_na()
+hd <- \(d) detect(d)$clim |> filter(event %in% T) |> count(year = year(t), name = "days")
+full_join(hd(o) |> rename(oisst_days = days), hd(n) |> rename(ostia_days = days), by = "year") |>
+  replace_na(list(oisst_days = 0, ostia_days = 0)) |>
+  arrange(year) |>
+  filter(oisst_days > 0 | ostia_days > 0) |>
+  kable(caption = glue("OCNMS heatwave days per year (daily-anomaly correlation r = {round(cor(both$anom_oisst, both$anom_ostia), 3)}, n = {nrow(both)} days)."))
+```
+
+## Part 2: coral heat stress
+
+Source: NOAA Coral Reef Watch 5 km Regional Virtual Stations (daily text files,
+`coralreefwatch.noaa.gov/product/vs/data/<station>.txt`). Maximum Degree Heating Week (DHW, from the
+90th-percentile hot spot) and the 7-day maximum Bleaching Alert Area (BAA) value are summarised by month.
+In these files BAA is 0 no stress, 1 Watch, 2 Warning, 3 Alert Level 1, 4 Alert Level 2 (5 = Level 3+),
+so `days_alert1plus` counts days with BAA >= 3.
+
+```{r}
+#| label: tbl-stations
+
+stations <- tribble(
+  ~nms,      ~station,         ~why,
+  "FKNMS",   "florida_keys",   "Florida Keys virtual station (middle -81.6, 24.75) covers the Keys reef tract",
+  "FGBNMS",  "flower_garden",  "Flower Garden Banks, Texas station (-93.98, 28.05) is the banks themselves",
+  "PNMS",    "nwhi",           "Northwestern Hawaiian Islands station (-170.1, 25.7), the only NWHI station; covers the sanctuary reefs",
+  "HIHWNMS", "hawaii",         "Main Hawaiian Islands station (-157.7, 20.58) spans Kauai, Oahu, Maui Nui and Hawaii; no finer split exists",
+  "NMSAS",   "samoas",         "Samoas station (-170.5, -12.8) covers American Samoa")
+stations |> kable(caption = "Virtual stations used per coral sanctuary.")
+
+crw_url <- \(s) glue("https://coralreefwatch.noaa.gov/product/vs/data/{s}.txt")
+crw_txt <- \(s) file.path(dir_raw, "crw", glue("{s}.txt"))
+for (s in unique(stations$station)) if (!file.exists(crw_txt(s))) fetch(crw_url(s), crw_txt(s))
+
+crw <- map2(stations$nms, stations$station, \(n, s) {
+  read_table(I(str_subset(readLines(crw_txt(s)), "^\\d{4} \\d{2} \\d{2} +\\S+ +\\S+")), col_names = c(
+    "yy", "mm", "dd", "sst_min", "sst_max", "sst90", "ssta90", "hs", "dhw", "baa"),
+    col_types = "iiiddddddi", skip_empty_rows = T, comment = "") |>
+    filter(!is.na(yy)) |>
+    mutate(nms = n, station = s, date = make_date(yy, mm, dd))
+}) |> list_rbind()
+```
+
+```{r}
+#| label: dhw
+
+dhw_monthly <- crw |>
+  mutate(date = floor_date(date, "month")) |>
+  group_by(nms, station, date) |>
+  summarize(dhw_max = round(max(dhw), 3), baa_max = max(baa), .groups = "drop") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms, date)
+dhw_annual <- crw |>
+  mutate(year = year(date)) |>
+  group_by(nms, station, year) |>
+  summarize(dhw_max = round(max(dhw), 3), days_alert1plus = sum(baa >= 3), .groups = "drop") |>
+  mutate(nms = factor(nms, NMS_ORD)) |>
+  arrange(nms, year)
+dhw_monthly |> write_csv(dhw_monthly_csv)
+dhw_annual  |> write_csv(dhw_annual_csv)
+
+dhw_annual |>
+  group_by(year) |>
+  filter(max(dhw_max) >= 4) |>
+  ungroup() |>
+  select(nms, year, dhw_max) |>
+  pivot_wider(names_from = nms, values_from = dhw_max) |>
+  select(year, any_of(CORAL_NMS)) |>
+  kable(caption = "Maximum DHW (degree C-weeks) by year, for years when any coral sanctuary reached 4 or more.")
+```
+
+## Part 3: tropical cyclones
+
+Source: IBTrACS v04r01 CSV by basin (North Atlantic, Eastern Pacific incl. central Pacific, South Pacific, plus Western Pacific for the western part of Papahanaumokuakea).
+For each sanctuary and storm since `r STORM_YEAR` we take the track point nearest to the polygon (geodesic
+distance, 0 inside), among points that carry a US-agency wind (`USA_WIND`); storms within
+`r STORM_KM` km are kept. Category is Saffir-Simpson from that wind (kt): TD < 34, TS 34-63, 1: 64-82,
+2: 83-95, 3: 96-112, 4: 113-136, 5: 137+.
+
+```{r}
+#| label: storms
+
+if (!file.exists(storms_csv)) {
+  base <- "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r01/access/csv"
+  tracks <- map(c("NA", "EP", "SP", "WP"), \(b) {
+    f <- file.path(dir_raw, "ibtracs", glue("ibtracs.{b}.list.v04r01.csv"))
+    if (!file.exists(f)) fetch(glue("{base}/ibtracs.{b}.list.v04r01.csv"), f)
+    read_csv(f, skip = 2, col_names = names(read_csv(f, n_max = 0)), guess_max = 0,
+             col_types = cols(.default = "c")) |>
+      transmute(
+        storm_id = SID, name = NAME, season = as.integer(SEASON), time = ISO_TIME,
+        lat = as.numeric(LAT), lon = as.numeric(LON), wind_kt = as.numeric(USA_WIND))
+  }) |> list_rbind() |>
+    filter(season >= STORM_YEAR, !is.na(wind_kt), !is.na(lat), !is.na(lon)) |>
+    distinct(storm_id, time, .keep_all = T)
+
+  sf_use_s2(TRUE)
+  sanc_s2 <- st_make_valid(sanc)
+  pts <- st_as_sf(tracks, coords = c("lon", "lat"), crs = 4326, remove = F)
+  out <- map(NMS_ORD, \(code) {
+    g  <- sanc_s2 |> filter(nms == code)
+    bb <- st_bbox(g)
+    near <- tracks |>
+      filter(lon > bb["xmin"] - 4, lon < bb["xmax"] + 4, lat > bb["ymin"] - 4, lat < bb["ymax"] + 4)
+    if (nrow(near) == 0) return(NULL)
+    p <- st_as_sf(near, coords = c("lon", "lat"), crs = 4326, remove = F)
+    near |>
+      mutate(dist_km = as.numeric(st_distance(p, st_union(g$geometry))[, 1]) / 1000) |>
+      filter(dist_km <= STORM_KM) |>
+      group_by(storm_id) |>
+      slice_min(dist_km, n = 1, with_ties = F) |>
+      ungroup() |>
+      transmute(
+        nms = code, storm_id, name, date = as.Date(time), dist_km = round(dist_km, 1), wind_kt,
+        category = case_when(
+          wind_kt >= 137 ~ "5", wind_kt >= 113 ~ "4", wind_kt >= 96 ~ "3", wind_kt >= 83 ~ "2",
+          wind_kt >= 64 ~ "1", wind_kt >= 34 ~ "TS", T ~ "TD"))
+  }) |> list_rbind() |>
+    mutate(nms = factor(nms, NMS_ORD)) |>
+    arrange(nms, date)
+  write_csv(out, storms_csv)
+}
+storms <- read_csv(storms_csv) |> mutate(nms = factor(nms, NMS_ORD))
+
+storms |>
+  mutate(cat = if_else(category %in% as.character(1:5), "hurricane", "TS or TD")) |>
+  count(nms, cat, .drop = F) |>
+  pivot_wider(names_from = cat, values_from = n, values_fill = 0) |>
+  kable(caption = glue("Storms since {STORM_YEAR} passing within {STORM_KM} km, by strength."))
+
+storms |>
+  filter(category %in% as.character(1:5)) |>
+  arrange(nms, date) |>
+  kable(caption = "Hurricane-strength storms within 150 km at closest approach.")
+```
+
+## Checks
+
+```{r}
+#| label: checks
+
+chk <- \(f, cols) {
+  d <- read_csv(f)
+  stopifnot(identical(names(d), cols), nrow(d) > 0)
+  d
+}
+ev  <- chk(mhw_events_csv, c("nms", "kind", "date_start", "date_peak", "date_end", "duration",
+  "intensity_max", "intensity_cumulative", "category"))
+mm  <- chk(mhw_monthly_csv, c("nms", "date", "mhw_days", "mcs_days", "mhw_max_cat", "sst_daily"))
+ma  <- chk(mhw_annual_csv, c("nms", "year", "mhw_days", "mcs_days", "mhw_events", "mhw_max_cat", "mhw_cum_intensity"))
+dm  <- chk(dhw_monthly_csv, c("nms", "station", "date", "dhw_max", "baa_max"))
+da  <- chk(dhw_annual_csv, c("nms", "station", "year", "dhw_max", "days_alert1plus"))
+st  <- chk(storms_csv, c("nms", "storm_id", "name", "date", "dist_km", "wind_kt", "category"))
+
+stopifnot(
+  setequal(unique(mm$nms), NMS_ORD), setequal(unique(ma$nms), NMS_ORD),
+  min(mm$date) == as.Date("1982-01-01"),
+  # every sanctuary has every month from 1982-01 to the latest month
+  all(count(mm, nms)$n == length(seq(min(mm$date), max(mm$date), by = "month"))),
+  all(mm$mhw_max_cat %in% 0:4), all(mm$mhw_days <= 31), !anyNA(mm$mhw_days),
+  all(ev$kind %in% c("mhw", "mcs")),
+  setequal(unique(dm$nms), CORAL_NMS), setequal(unique(da$nms), CORAL_NMS),
+  all(dm$dhw_max >= 0), all(st$dist_km <= STORM_KM), all(st$date >= as.Date(glue("{STORM_YEAR}-01-01"))),
+  all(st$nms %in% NMS_ORD))
+tibble(
+  file = c("mhw_monthly", "dhw_monthly", "storms"),
+  from = c(min(mm$date), min(dm$date), min(st$date)),
+  to   = c(max(mm$date), max(dm$date), max(st$date)),
+  rows = c(nrow(mm), nrow(dm), nrow(st))) |>
+  kable(caption = "Checks passed: schemas, 14 sanctuaries in the monthly file, date ranges.")
+```
